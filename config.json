@@ -1,0 +1,16 @@
+{
+  "serial_mode": "usb",
+  "serial_port_usb": "/dev/ttyUSB0",
+  "serial_port_uart": "/dev/ttyAMA0",
+  "serial_port_tcp": "localhost:4403",
+  "ots_host": "127.0.0.1",
+  "ots_port": 8088,
+  "ots_ssl": false,
+  "callsign": "MESH-GW",
+  "log_buffer_size": 500,
+  "cot_types_allowed": ["a-f-", "b-t-f", "b-m-p-"],
+  "mesh_channels": [
+    {"index": 0, "name": "Primary", "psk": "AQ==", "enabled": true},
+    {"index": 1, "name": "Admin",   "psk": "AQ==", "enabled": false}
+  ]
+}

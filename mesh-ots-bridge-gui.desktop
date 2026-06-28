@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Mesh-OTS Bridge
+Comment=Meshtastic to OpenTakServer bridge control panel
+Exec=/usr/bin/python3 /opt/mesh-ots-bridge/gui.py
+Icon=network-wireless
+Terminal=false
+Categories=Utility;Network;
+X-GNOME-Autostart-enabled=true
