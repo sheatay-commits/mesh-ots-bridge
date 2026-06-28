@@ -1,6 +1,7 @@
 """Meshtastic serial connection wrapper with auto-reconnect."""
 
 import logging
+import os
 import threading
 import time
 import traceback
@@ -344,20 +345,36 @@ class SerialIface:
                 iface = self._iface
             if iface is None:
                 break
+
+            gone = False
             try:
-                # SerialInterface: background send thread dying = disconnect
-                send_thread = getattr(iface, "_sendThread", None)
-                if send_thread is not None and not send_thread.is_alive():
-                    logger.warning("Meshtastic send thread died — disconnected")
-                    break
-                # TCPInterface / StreamInterface: stream closed = disconnect
-                stream = getattr(iface, "stream", None)
-                if stream and hasattr(stream, "closed") and stream.closed:
-                    logger.warning("Meshtastic stream closed — disconnected")
-                    break
+                # Fastest check for USB/UART: device file vanishes on unplug
+                if self.port.startswith("/dev/") and not os.path.exists(self.port):
+                    logger.warning("Device %s disappeared — disconnected", self.port)
+                    gone = True
+
+                # Background thread check (receive thread dies before send thread)
+                if not gone:
+                    for attr in ("_receiveThread", "_sendThread"):
+                        t = getattr(iface, attr, None)
+                        if t is not None and not t.is_alive():
+                            logger.warning("Meshtastic %s died — disconnected", attr)
+                            gone = True
+                            break
+
+                # TCP: stream closed
+                if not gone:
+                    stream = getattr(iface, "stream", None)
+                    if stream and hasattr(stream, "closed") and stream.closed:
+                        logger.warning("Meshtastic stream closed — disconnected")
+                        gone = True
+
             except Exception:
+                gone = True
+
+            if gone:
                 break
-            time.sleep(2)
+            time.sleep(1)
 
         if self._connected:
             self._connected = False
