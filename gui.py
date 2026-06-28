@@ -72,6 +72,7 @@ class App(tk.Tk):
 
         self._filter_vars = {}   # packet filter checkboxes
         self._last_traffic_count = 0
+        self._journal_last_line  = ""
 
         self._build_ui()
         self._poll()
@@ -127,6 +128,8 @@ class App(tk.Tk):
         self._tab_telemetry = tk.Frame(self._nb, bg=BG)
         self._tab_channels  = tk.Frame(self._nb, bg=BG)
         self._tab_nodes     = tk.Frame(self._nb, bg=BG)
+        self._tab_mesh_cfg  = tk.Frame(self._nb, bg=BG)
+        self._tab_ots       = tk.Frame(self._nb, bg=BG)
         self._tab_datalog   = tk.Frame(self._nb, bg=BG)
         self._tab_config    = tk.Frame(self._nb, bg=BG)
 
@@ -134,6 +137,8 @@ class App(tk.Tk):
         self._nb.add(self._tab_telemetry, text="  Telemetry  ")
         self._nb.add(self._tab_channels,  text="  Channels  ")
         self._nb.add(self._tab_nodes,     text="  Nodes  ")
+        self._nb.add(self._tab_mesh_cfg,  text="  Node Config  ")
+        self._nb.add(self._tab_ots,       text="  OTS  ")
         self._nb.add(self._tab_datalog,   text="  System Log  ")
         self._nb.add(self._tab_config,    text="  Config  ")
 
@@ -141,6 +146,8 @@ class App(tk.Tk):
         self._build_telemetry_tab()
         self._build_channels_tab()
         self._build_nodes_tab()
+        self._build_mesh_config_tab()
+        self._build_ots_tab()
         self._build_datalog_tab()
         self._build_config_tab()
 
@@ -472,12 +479,380 @@ class App(tk.Tk):
                 f"{n.get('snr', '?')} dB" if n.get("snr") is not None else "?",
             ))
 
+    # ── Node Config tab ───────────────────────────────────────────────────────
+
+    # Enum option lists (index == protobuf int value)
+    _REGIONS = ["UNSET","US","EU_433","EU_868","CN","JP","ANZ","KR","TW","RU",
+                "IN","NZ_865","TH","LORA_24","UA_433","UA_868","MY_433","MY_919","SG_923"]
+    _MODEM_PRESETS = ["LONG_FAST","LONG_SLOW","VERY_LONG_SLOW","MEDIUM_SLOW",
+                      "MEDIUM_FAST","SHORT_SLOW","SHORT_FAST","LONG_MODERATE"]
+    _DEVICE_ROLES  = ["CLIENT","CLIENT_MUTE","ROUTER","ROUTER_CLIENT","REPEATER",
+                      "TRACKER","SENSOR","TAK","CLIENT_HIDDEN","LOST_AND_FOUND","TAK_TRACKER"]
+    _BT_MODES      = ["RANDOM_PIN","FIXED_PIN","NO_PIN"]
+
+    def _build_mesh_config_tab(self):
+        tab = self._tab_mesh_cfg
+        self._mesh_cfg_vars = {}   # keyed "section.field"
+
+        # ── Info bar ────────────────────────────────────────────────────────
+        info = tk.Frame(tab, bg=DIM, pady=6,
+                        highlightbackground=ACCENT, highlightthickness=1)
+        info.pack(fill=tk.X)
+        tk.Label(info, text="◈ MESHTASTIC NODE CONFIG", bg=DIM, fg=ACCENT,
+                 font=self._mono_bold, padx=8).pack(side=tk.LEFT)
+        tk.Button(info, text="[ REFRESH ]", bg=DIM, fg=ACCENT, relief=tk.FLAT,
+                  cursor="hand2", font=self._mono_bold,
+                  command=self._mesh_cfg_refresh).pack(side=tk.RIGHT, padx=8)
+
+        # Live info labels
+        self._mesh_info_labels = {}
+        info_fields = [("node_id","NODE ID"),("hw_model","HW"),("firmware","FW"),
+                       ("battery","BAT"),("uptime","UPTIME")]
+        ibar = tk.Frame(tab, bg=PANEL, pady=4,
+                        highlightbackground=BORDER, highlightthickness=1)
+        ibar.pack(fill=tk.X)
+        for key, label in info_fields:
+            tk.Label(ibar, text=f" {label}:", bg=PANEL, fg=SUBTEXT,
+                     font=self._small).pack(side=tk.LEFT, padx=(8,0))
+            lbl = tk.Label(ibar, text="--", bg=PANEL, fg=TEXT, font=self._mono_bold)
+            lbl.pack(side=tk.LEFT, padx=(2,8))
+            self._mesh_info_labels[key] = lbl
+
+        # ── Scrollable config area ───────────────────────────────────────────
+        outer = tk.Frame(tab, bg=BG)
+        outer.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        vsb = tk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview,
+                           bg=DIM, troughcolor=BG)
+        inner = tk.Frame(canvas, bg=BG)
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0,0), window=inner, anchor=tk.NW)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        canvas.bind("<MouseWheel>",
+                    lambda e: canvas.yview_scroll(-1*(e.delta//120), "units"))
+
+        self._mesh_inner = inner
+        self._mesh_canvas = canvas
+
+        # Build sections
+        self._mesh_build_section(inner, "IDENTITY", [
+            ("long_name",  "Long Name",  "entry",    "identity"),
+            ("short_name", "Short Name", "entry",    "identity"),
+        ])
+        self._mesh_build_section(inner, "LoRa RADIO", [
+            ("region_name",       "Region",       "combo",    "lora", self._REGIONS),
+            ("modem_preset_name", "Modem Preset", "combo",    "lora", self._MODEM_PRESETS),
+            ("hop_limit",         "Hop Limit",    "spin",     "lora", (1, 7)),
+            ("tx_power",          "TX Power dBm", "spin",     "lora", (1, 30)),
+            ("use_preset",        "Use Preset",   "check",    "lora"),
+        ])
+        self._mesh_build_section(inner, "DEVICE", [
+            ("role_name",          "Role",              "combo", "device", self._DEVICE_ROLES),
+            ("serial_enabled",     "Serial Enabled",    "check", "device"),
+            ("debug_log_enabled",  "Debug Log",         "check", "device"),
+        ])
+        self._mesh_build_section(inner, "POSITION", [
+            ("gps_enabled",               "GPS Enabled",          "check", "position"),
+            ("gps_update_interval",       "GPS Update (s)",       "entry", "position"),
+            ("position_broadcast_secs",   "Broadcast Interval (s)","entry","position"),
+            ("smart_position_enabled",    "Smart Position",       "check", "position"),
+            ("broadcast_smart_minimum_interval_secs", "Smart Min Interval (s)", "entry", "position"),
+            ("broadcast_smart_minimum_distance",      "Smart Min Distance (m)", "entry", "position"),
+        ])
+        self._mesh_build_section(inner, "POWER", [
+            ("is_power_saving",               "Power Saving",          "check", "power"),
+            ("wait_bluetooth_secs",           "BT Timeout (s)",        "entry", "power"),
+            ("ls_secs",                       "Light Sleep (s)",       "entry", "power"),
+            ("on_battery_shutdown_after_secs","Battery Shutdown (s)",  "entry", "power"),
+        ])
+        self._mesh_build_section(inner, "BLUETOOTH", [
+            ("enabled",   "Enabled",     "check", "bluetooth"),
+            ("mode_name", "Pairing Mode","combo",  "bluetooth", self._BT_MODES),
+            ("fixed_pin", "Fixed PIN",   "entry",  "bluetooth"),
+        ])
+        self._mesh_build_section(inner, "DISPLAY", [
+            ("screen_on_secs",            "Screen On (s)",      "entry", "display"),
+            ("auto_screen_carousel_secs", "Carousel (s)",       "entry", "display"),
+            ("flip_screen",               "Flip Screen",        "check", "display"),
+        ])
+
+        # ── Node control ────────────────────────────────────────────────────
+        ctrl = tk.Frame(inner, bg=PANEL, pady=8,
+                        highlightbackground=BORDER, highlightthickness=1)
+        ctrl.pack(fill=tk.X, padx=8, pady=(4, 12))
+        tk.Label(ctrl, text="◈ NODE CONTROL", bg=PANEL, fg=ACCENT,
+                 font=self._mono_bold, padx=8).pack(anchor=tk.W)
+        btn_row = tk.Frame(ctrl, bg=PANEL)
+        btn_row.pack(padx=16, pady=6)
+        tk.Button(btn_row, text="↺  REBOOT NODE", bg=DIM, fg=YELLOW,
+                  relief=tk.FLAT, cursor="hand2", font=self._mono_bold,
+                  highlightbackground=YELLOW, highlightthickness=1, padx=12,
+                  command=self._mesh_reboot).pack(side=tk.LEFT, padx=8)
+        tk.Button(btn_row, text="⏻  SHUTDOWN NODE", bg=DIM, fg=RED,
+                  relief=tk.FLAT, cursor="hand2", font=self._mono_bold,
+                  highlightbackground=RED, highlightthickness=1, padx=12,
+                  command=self._mesh_shutdown).pack(side=tk.LEFT, padx=8)
+
+    def _mesh_build_section(self, parent, title, fields):
+        """Build a labeled config section with Apply button."""
+        frm = tk.Frame(parent, bg=PANEL,
+                       highlightbackground=BORDER, highlightthickness=1)
+        frm.pack(fill=tk.X, padx=8, pady=4)
+        tk.Label(frm, text=f"◈ {title}", bg=PANEL, fg=ACCENT,
+                 font=self._mono_bold, padx=8, pady=4).grid(
+                     row=0, column=0, columnspan=3, sticky=tk.W)
+
+        section_keys = set()
+        for row_idx, field_def in enumerate(fields, start=1):
+            key      = field_def[0]
+            label    = field_def[1]
+            ftype    = field_def[2]
+            section  = field_def[3]
+            var_key  = f"{section}.{key}"
+            section_keys.add(section)
+
+            tk.Label(frm, text=label, bg=PANEL, fg=TEXT,
+                     font=self._mono, width=26, anchor=tk.W,
+                     padx=16).grid(row=row_idx, column=0, pady=3, sticky=tk.W)
+            tk.Label(frm, text="›", bg=PANEL, fg=ACCENT,
+                     font=self._mono).grid(row=row_idx, column=1, padx=4)
+
+            if ftype == "check":
+                var = tk.BooleanVar()
+                tk.Checkbutton(frm, variable=var, bg=PANEL, fg=ACCENT,
+                               selectcolor=BG, activebackground=PANEL,
+                               font=self._mono).grid(row=row_idx, column=2, sticky=tk.W)
+            elif ftype == "combo":
+                options = field_def[4]
+                var = tk.StringVar()
+                ttk.Combobox(frm, textvariable=var, values=options,
+                             width=22, state="readonly",
+                             font=self._mono).grid(row=row_idx, column=2, sticky=tk.W, padx=4)
+            elif ftype == "spin":
+                lo, hi = field_def[4]
+                var = tk.IntVar()
+                tk.Spinbox(frm, textvariable=var, from_=lo, to=hi, width=8,
+                           bg=BORDER, fg=TEXT, buttonbackground=DIM,
+                           insertbackground=ACCENT, relief=tk.FLAT,
+                           font=self._mono).grid(row=row_idx, column=2, sticky=tk.W, padx=4)
+            else:  # entry
+                var = tk.StringVar()
+                tk.Entry(frm, textvariable=var, bg=BORDER, fg=TEXT,
+                         insertbackground=ACCENT, relief=tk.FLAT,
+                         font=self._mono, width=24,
+                         highlightbackground=SUBTEXT,
+                         highlightthickness=1).grid(row=row_idx, column=2, sticky=tk.W, padx=4)
+
+            self._mesh_cfg_vars[var_key] = {"var": var, "type": ftype, "section": section, "key": key}
+
+        apply_row = len(fields) + 1
+        sections = list(section_keys)
+        tk.Button(frm, text="[ APPLY ]", bg=DIM, fg=GREEN,
+                  relief=tk.FLAT, cursor="hand2", font=self._mono_bold,
+                  highlightbackground=GREEN, highlightthickness=1, padx=10,
+                  command=lambda s=sections, t=title: self._mesh_cfg_apply(s, t)
+                  ).grid(row=apply_row, column=0, columnspan=3,
+                         pady=(6,10), padx=16, sticky=tk.W)
+
+    def _mesh_cfg_refresh(self):
+        def fetch():
+            info = _api_get("/mesh/info")
+            cfg  = _api_get("/mesh/config")
+            self.after(0, lambda: self._mesh_cfg_populate(info, cfg))
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _mesh_cfg_populate(self, info, cfg):
+        if info:
+            bat = info.get("battery")
+            up  = info.get("uptime")
+            self._mesh_info_labels["node_id"].config(text=info.get("node_id","--"))
+            self._mesh_info_labels["hw_model"].config(text=info.get("hw_model","--"))
+            self._mesh_info_labels["firmware"].config(text=info.get("firmware","--"))
+            self._mesh_info_labels["battery"].config(
+                text=f"{bat}%" if bat is not None else "--",
+                fg=RED if bat is not None and bat < 20 else GREEN)
+            self._mesh_info_labels["uptime"].config(text=_fmt_uptime(up))
+
+        if not cfg:
+            return
+        for var_key, meta in self._mesh_cfg_vars.items():
+            section = meta["section"]
+            key     = meta["key"]
+            ftype   = meta["type"]
+            var     = meta["var"]
+            sec_data = cfg.get(section, {})
+            if key not in sec_data:
+                continue
+            val = sec_data[key]
+            try:
+                if ftype == "check":
+                    var.set(bool(val))
+                elif ftype == "combo":
+                    var.set(str(val))
+                elif ftype == "spin":
+                    var.set(int(val))
+                else:
+                    var.set(str(val))
+            except Exception:
+                pass
+
+    def _mesh_cfg_apply(self, sections, title):
+        # Collect updates per section
+        updates_by_section = {}
+        for var_key, meta in self._mesh_cfg_vars.items():
+            if meta["section"] not in sections:
+                continue
+            section = meta["section"]
+            key     = meta["key"]
+            ftype   = meta["type"]
+            var     = meta["var"]
+            if section not in updates_by_section:
+                updates_by_section[section] = {}
+            try:
+                val = var.get()
+                # Convert name→int for enum fields
+                if key == "region_name":
+                    key = "region"; val = self._REGIONS.index(val)
+                elif key == "modem_preset_name":
+                    key = "modem_preset"; val = self._MODEM_PRESETS.index(val)
+                elif key == "role_name":
+                    key = "role"; val = self._DEVICE_ROLES.index(val)
+                elif key == "mode_name":
+                    key = "mode"; val = self._BT_MODES.index(val)
+                elif ftype == "entry" and key not in ("long_name","short_name"):
+                    val = int(val) if str(val).isdigit() else val
+                updates_by_section[section][key] = val
+            except Exception:
+                pass
+
+        # Handle identity separately
+        if "identity" in sections:
+            ln = self._mesh_cfg_vars.get("identity.long_name",  {}).get("var")
+            sn = self._mesh_cfg_vars.get("identity.short_name", {}).get("var")
+            def post_owner():
+                _api_post("/mesh/owner", {
+                    "long_name":  ln.get() if ln else "",
+                    "short_name": sn.get() if sn else "",
+                })
+            threading.Thread(target=post_owner, daemon=True).start()
+            messagebox.showinfo("Applied", f"Identity update sent to node.")
+            return
+
+        def post_all():
+            for sec, updates in updates_by_section.items():
+                _api_post(f"/mesh/config/{sec}", updates)
+        threading.Thread(target=post_all, daemon=True).start()
+        messagebox.showinfo("Applied", f"{title} config sent to node.")
+
+    def _mesh_reboot(self):
+        if messagebox.askyesno("Reboot Node",
+                               "Reboot the connected Meshtastic node?"):
+            threading.Thread(target=lambda: _api_post("/mesh/reboot"), daemon=True).start()
+
+    def _mesh_shutdown(self):
+        if messagebox.askyesno("Shutdown Node",
+                               "Shut down the connected Meshtastic node?\n"
+                               "It will need to be powered off and on to recover."):
+            threading.Thread(target=lambda: _api_post("/mesh/shutdown"), daemon=True).start()
+
+    # ── OTS tab ───────────────────────────────────────────────────────────────
+
+    def _build_ots_tab(self):
+        tab = self._tab_ots
+
+        hdr = tk.Frame(tab, bg=DIM, pady=6,
+                       highlightbackground=ACCENT, highlightthickness=1)
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="◈ OPENTAK SERVER", bg=DIM, fg=ACCENT,
+                 font=self._mono_bold, padx=8).pack(side=tk.LEFT)
+
+        # ── Connection status panel ──────────────────────────────────────────
+        conn = tk.Frame(tab, bg=PANEL, pady=12,
+                        highlightbackground=BORDER, highlightthickness=1)
+        conn.pack(fill=tk.X, padx=8, pady=8)
+        tk.Label(conn, text="◈ CONNECTION", bg=PANEL, fg=ACCENT,
+                 font=self._mono_bold, padx=8).grid(row=0, column=0, columnspan=2,
+                                                     sticky=tk.W, pady=(0,6))
+        ots_fields = [
+            ("Status",    "_ots_status_lbl"),
+            ("Host",      "_ots_host_lbl"),
+            ("Port",      "_ots_port_lbl"),
+            ("SSL",       "_ots_ssl_lbl"),
+            ("CoT RX",    "_ots_rx_lbl"),
+            ("Mesh RX",   "_ots_mesh_rx_lbl"),
+        ]
+        for i, (label, attr) in enumerate(ots_fields, start=1):
+            tk.Label(conn, text=label, bg=PANEL, fg=SUBTEXT,
+                     font=self._mono, width=16, anchor=tk.W,
+                     padx=16).grid(row=i, column=0, pady=3, sticky=tk.W)
+            lbl = tk.Label(conn, text="--", bg=PANEL, fg=TEXT, font=self._mono_bold)
+            lbl.grid(row=i, column=1, sticky=tk.W, padx=8)
+            setattr(self, attr, lbl)
+
+        # ── Web UI panel ─────────────────────────────────────────────────────
+        web = tk.Frame(tab, bg=PANEL, pady=12,
+                       highlightbackground=BORDER, highlightthickness=1)
+        web.pack(fill=tk.X, padx=8, pady=4)
+        tk.Label(web, text="◈ WEB INTERFACE", bg=PANEL, fg=ACCENT,
+                 font=self._mono_bold, padx=8).pack(anchor=tk.W)
+
+        self._ots_url_var = tk.StringVar(value="https://192.168.1.163/dashboard")
+        url_row = tk.Frame(web, bg=PANEL)
+        url_row.pack(fill=tk.X, padx=16, pady=6)
+        tk.Label(url_row, text="URL:", bg=PANEL, fg=SUBTEXT, font=self._mono).pack(side=tk.LEFT)
+        url_entry = tk.Entry(url_row, textvariable=self._ots_url_var,
+                             bg=BORDER, fg=ACCENT, insertbackground=ACCENT,
+                             relief=tk.FLAT, font=self._mono, width=40,
+                             highlightbackground=SUBTEXT, highlightthickness=1)
+        url_entry.pack(side=tk.LEFT, padx=8)
+        tk.Button(url_row, text="[ OPEN IN BROWSER ]", bg=DIM, fg=GREEN,
+                  relief=tk.FLAT, cursor="hand2", font=self._mono_bold,
+                  highlightbackground=GREEN, highlightthickness=1, padx=10,
+                  command=self._ots_open_browser).pack(side=tk.LEFT, padx=8)
+
+        # ── CoT filter display ───────────────────────────────────────────────
+        cot = tk.Frame(tab, bg=PANEL, pady=10,
+                       highlightbackground=BORDER, highlightthickness=1)
+        cot.pack(fill=tk.X, padx=8, pady=4)
+        tk.Label(cot, text="◈ CoT TYPE ALLOWLIST", bg=PANEL, fg=ACCENT,
+                 font=self._mono_bold, padx=8).pack(anchor=tk.W)
+        self._ots_cot_lbl = tk.Label(cot, text="--", bg=PANEL, fg=TEXT,
+                                     font=self._mono, padx=24, pady=4)
+        self._ots_cot_lbl.pack(anchor=tk.W)
+
+    def _update_ots_tab(self, status, cfg, stats):
+        if not status:
+            return
+        connected = status.get("ots_connected", False)
+        self._ots_status_lbl.config(
+            text="● CONNECTED" if connected else "● DISCONNECTED",
+            fg=GREEN if connected else RED)
+        self._ots_host_lbl.config(text=status.get("ots_host","--"))
+        self._ots_port_lbl.config(text=str(status.get("ots_port","--")))
+        if cfg:
+            self._ots_ssl_lbl.config(text="YES" if cfg.get("ots_ssl") else "NO")
+            prefixes = cfg.get("cot_types_allowed", [])
+            self._ots_cot_lbl.config(text="  |  ".join(prefixes) if prefixes else "--")
+        if stats:
+            self._ots_rx_lbl.config(text=f"{stats.get('ots_rx',0):,} packets")
+            self._ots_mesh_rx_lbl.config(text=f"{stats.get('mesh_rx',0):,} packets")
+
+    def _ots_open_browser(self):
+        import subprocess as sp
+        url = self._ots_url_var.get()
+        try:
+            sp.Popen(["xdg-open", url])
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open browser:\n{e}")
+
     # ── System Log tab ────────────────────────────────────────────────────────
 
     def _build_datalog_tab(self):
         tab = self._tab_datalog
         self._journal_autoscroll = tk.BooleanVar(value=True)
-        self._journal_last_lines = 0
 
         hdr = tk.Frame(tab, bg=DIM, pady=5,
                        highlightbackground=BORDER, highlightthickness=1)
@@ -516,9 +891,12 @@ class App(tk.Tk):
         self._journal_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
     def _journal_update(self, lines):
-        if len(lines) == self._journal_last_lines:
+        if not lines:
             return
-        self._journal_last_lines = len(lines)
+        last = lines[-1]
+        if last == self._journal_last_line:
+            return
+        self._journal_last_line = last
         self._journal_text.config(state=tk.NORMAL)
         self._journal_text.delete("1.0", tk.END)
         for line in lines:
@@ -668,9 +1046,11 @@ class App(tk.Tk):
         cfg       = _api_get("/config")
         telemetry = _api_get("/telemetry")
         journal   = _api_get("/journal?lines=300")
-        self.after(0, lambda: self._apply_updates(status, traffic, nodes, cfg, telemetry, journal))
+        stats     = _api_get("/stats")
+        self.after(0, lambda: self._apply_updates(
+            status, traffic, nodes, cfg, telemetry, journal, stats))
 
-    def _apply_updates(self, status, traffic, nodes, cfg, telemetry, journal):
+    def _apply_updates(self, status, traffic, nodes, cfg, telemetry, journal, stats):
         self._update_status_bar(status)
         if traffic  is not None: self._update_traffic(traffic)
         if nodes    is not None: self._update_nodes(nodes)
@@ -680,6 +1060,7 @@ class App(tk.Tk):
                 self._serial_mode.set(cfg.get("serial_mode", "usb"))
         if telemetry is not None: self._update_telemetry(telemetry)
         if journal   is not None: self._journal_update(journal.get("lines", []))
+        self._update_ots_tab(status, cfg, stats)
 
     def _update_status_bar(self, status):
         if not status:
@@ -788,6 +1169,7 @@ def _fmt_uptime(seconds):
 
 if __name__ == "__main__":
     app = App()
-    app.after(500, app._refresh_channels)
-    app.after(800, app._datalog_refresh_dates)
+    app.after(500,  app._refresh_channels)
+    app.after(800,  app._datalog_refresh_dates)
+    app.after(1200, app._mesh_cfg_refresh)
     app.mainloop()

@@ -39,6 +39,10 @@ _airtime_current = 0.0
 _airtime_peak    = 0.0
 _airtime_lock    = threading.Lock()
 
+# Bridge packet counters
+_stats = {"mesh_rx": 0, "ots_rx": 0, "mesh_tx": 0, "ots_tx": 0}
+_stats_lock = threading.Lock()
+
 _serial_iface = None
 _ots_client   = None
 
@@ -71,6 +75,11 @@ def log_traffic(direction, summary, channel=None, portnum=None, node_id="", call
     }
     with _log_lock:
         _traffic_log.append(entry)
+    with _stats_lock:
+        if direction.startswith("mesh"):
+            _stats["mesh_rx"] += 1
+        else:
+            _stats["ots_rx"] += 1
     # Persist to daily log file
     try:
         os.makedirs(_LOG_DIR, exist_ok=True)
@@ -221,6 +230,64 @@ def svc_stop():
 def svc_start():
     _run_systemctl("start")
     return jsonify({"ok": True})
+
+
+@app.route("/stats")
+def stats():
+    with _stats_lock:
+        return jsonify(dict(_stats))
+
+
+@app.route("/mesh/info")
+def mesh_info():
+    if _serial_iface:
+        info = _serial_iface.get_info()
+        if info:
+            return jsonify(info)
+    return jsonify({"error": "not connected"}), 503
+
+
+@app.route("/mesh/config", methods=["GET"])
+def mesh_config_get():
+    if _serial_iface:
+        cfg = _serial_iface.get_local_config()
+        if cfg:
+            return jsonify(cfg)
+    return jsonify({"error": "not connected"}), 503
+
+
+@app.route("/mesh/config/<section>", methods=["POST"])
+def mesh_config_set(section):
+    updates = request.get_json(force=True)
+    if not _serial_iface:
+        return jsonify({"error": "not connected"}), 503
+    ok = _serial_iface.set_local_config(section, updates)
+    return jsonify({"ok": ok})
+
+
+@app.route("/mesh/owner", methods=["POST"])
+def mesh_owner():
+    data = request.get_json(force=True)
+    if not _serial_iface:
+        return jsonify({"error": "not connected"}), 503
+    ok = _serial_iface.set_owner(data.get("long_name", ""), data.get("short_name", ""))
+    return jsonify({"ok": ok})
+
+
+@app.route("/mesh/reboot", methods=["POST"])
+def mesh_reboot():
+    if not _serial_iface:
+        return jsonify({"error": "not connected"}), 503
+    ok = _serial_iface.reboot_node()
+    return jsonify({"ok": ok})
+
+
+@app.route("/mesh/shutdown", methods=["POST"])
+def mesh_shutdown():
+    if not _serial_iface:
+        return jsonify({"error": "not connected"}), 503
+    ok = _serial_iface.shutdown_node()
+    return jsonify({"ok": ok})
 
 
 @app.route("/journal")

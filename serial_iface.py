@@ -86,6 +86,175 @@ class SerialIface:
                     pass
         return []
 
+    def get_info(self):
+        """Return identity + live metrics for the locally connected node."""
+        with self._lock:
+            if not self._iface or not self._connected:
+                return None
+            try:
+                my_num = self._iface.myInfo.my_node_num
+                user = {}
+                node_entry = {}
+                if self._iface.nodes:
+                    for n in self._iface.nodes.values():
+                        if n.get("num") == my_num:
+                            user = n.get("user", {})
+                            node_entry = n
+                            break
+                meta = getattr(self._iface, "metadata", None)
+                dm = node_entry.get("deviceMetrics", {})
+                return {
+                    "node_id":    f"!{my_num:08x}",
+                    "long_name":  user.get("longName", ""),
+                    "short_name": user.get("shortName", ""),
+                    "hw_model":   user.get("hwModel", ""),
+                    "firmware":   meta.firmware_version if meta else "",
+                    "battery":    dm.get("batteryLevel"),
+                    "voltage":    dm.get("voltage"),
+                    "uptime":     dm.get("uptimeSeconds"),
+                    "air_util":   dm.get("airUtilTx"),
+                    "snr":        node_entry.get("snr"),
+                }
+            except Exception as e:
+                logger.error("get_info failed: %s", e)
+                return None
+
+    def get_local_config(self):
+        """Return all writable localConfig fields as a plain dict."""
+        with self._lock:
+            if not self._iface or not self._connected:
+                return None
+            try:
+                cfg = self._iface.localNode.localConfig
+                lora = cfg.lora
+                dev  = cfg.device
+                pos  = cfg.position
+                pwr  = cfg.power
+                bt   = cfg.bluetooth
+                disp = cfg.display
+
+                def _enum_name(pb_enum, val):
+                    try:
+                        return pb_enum.Name(val)
+                    except Exception:
+                        return str(val)
+
+                try:
+                    from meshtastic.protobuf import config_pb2 as _cpb
+                except ImportError:
+                    try:
+                        from meshtastic import config_pb2 as _cpb
+                    except ImportError:
+                        _cpb = None
+
+                def _rn(v):
+                    return _enum_name(_cpb.Config.LoRaConfig.RegionCode,  v) if _cpb else str(v)
+                def _mn(v):
+                    return _enum_name(_cpb.Config.LoRaConfig.ModemPreset, v) if _cpb else str(v)
+                def _dn(v):
+                    return _enum_name(_cpb.Config.DeviceConfig.Role,      v) if _cpb else str(v)
+                def _bn(v):
+                    return _enum_name(_cpb.Config.BluetoothConfig.PairingMode, v) if _cpb else str(v)
+
+                return {
+                    "lora": {
+                        "region":       lora.region, "region_name": _rn(lora.region),
+                        "modem_preset": lora.modem_preset, "modem_preset_name": _mn(lora.modem_preset),
+                        "hop_limit":    lora.hop_limit,
+                        "tx_power":     lora.tx_power,
+                        "use_preset":   lora.use_preset,
+                        "bandwidth":    lora.bandwidth,
+                        "spread_factor":lora.spread_factor,
+                        "coding_rate":  lora.coding_rate,
+                    },
+                    "device": {
+                        "role": dev.role, "role_name": _dn(dev.role),
+                        "serial_enabled":    dev.serial_enabled,
+                        "debug_log_enabled": dev.debug_log_enabled,
+                        "rebroadcast_mode":  dev.rebroadcast_mode,
+                    },
+                    "position": {
+                        "gps_enabled":                pos.gps_enabled,
+                        "gps_update_interval":        pos.gps_update_interval,
+                        "position_broadcast_secs":    pos.position_broadcast_secs,
+                        "smart_position_enabled":     pos.smart_position_enabled,
+                        "broadcast_smart_minimum_interval_secs":
+                            pos.position_broadcast_smart_minimum_interval_secs,
+                        "broadcast_smart_minimum_distance":
+                            pos.position_broadcast_smart_minimum_distance,
+                    },
+                    "power": {
+                        "is_power_saving":              pwr.is_power_saving,
+                        "on_battery_shutdown_after_secs": pwr.on_battery_shutdown_after_secs,
+                        "wait_bluetooth_secs":          pwr.wait_bluetooth_secs,
+                        "ls_secs":                      pwr.ls_secs,
+                        "min_wake_secs":                pwr.min_wake_secs,
+                    },
+                    "bluetooth": {
+                        "enabled":   bt.enabled,
+                        "mode":      bt.mode, "mode_name": _bn(bt.mode),
+                        "fixed_pin": bt.fixed_pin,
+                    },
+                    "display": {
+                        "screen_on_secs":              disp.screen_on_secs,
+                        "auto_screen_carousel_secs":   disp.auto_screen_carousel_secs,
+                        "flip_screen":                 disp.flip_screen,
+                        "units":                       disp.units,
+                    },
+                }
+            except Exception as e:
+                logger.error("get_local_config failed: %s", e)
+                return None
+
+    def set_local_config(self, section, updates):
+        """Write a subset of fields in one localConfig section and push to device."""
+        with self._lock:
+            if not self._iface or not self._connected:
+                return False
+            try:
+                sec = getattr(self._iface.localNode.localConfig, section)
+                for field, value in updates.items():
+                    if hasattr(sec, field):
+                        setattr(sec, field, value)
+                self._iface.localNode.writeConfig(section)
+                return True
+            except Exception as e:
+                logger.error("set_local_config(%s) failed: %s", section, e)
+                return False
+
+    def set_owner(self, long_name, short_name):
+        with self._lock:
+            if not self._iface or not self._connected:
+                return False
+            try:
+                self._iface.localNode.setOwner(long_name=long_name, short_name=short_name)
+                return True
+            except Exception as e:
+                logger.error("set_owner failed: %s", e)
+                return False
+
+    def reboot_node(self):
+        with self._lock:
+            if not self._iface or not self._connected:
+                return False
+            try:
+                self._iface.localNode.reboot()
+                return True
+            except Exception as e:
+                logger.error("reboot_node failed: %s", e)
+                return False
+
+    def shutdown_node(self):
+        with self._lock:
+            if not self._iface or not self._connected:
+                return False
+            try:
+                self._iface.localNode.shutdown()
+                return True
+            except Exception as e:
+                logger.error("shutdown_node failed: %s", e)
+                return False
+
     def get_channels(self):
         with self._lock:
             if self._iface and self._connected:
