@@ -203,7 +203,7 @@ class SerialIface:
                     },
                 }
             except Exception as e:
-                logger.error("get_local_config failed: %s", e)
+                logger.error("get_local_config failed: %s", e, exc_info=True)
                 return None
 
     def set_local_config(self, section, updates):

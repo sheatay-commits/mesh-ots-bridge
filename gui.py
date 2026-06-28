@@ -866,6 +866,7 @@ class App(tk.Tk):
         threading.Thread(target=fetch, daemon=True).start()
 
     def _mesh_cfg_populate(self, info, cfg):
+        # ── Info bar ────────────────────────────────────────────────────────
         if info:
             bat = info.get("battery")
             up  = info.get("uptime")
@@ -877,13 +878,23 @@ class App(tk.Tk):
                 fg=RED if bat is not None and bat < 20 else GREEN)
             self._mesh_info_labels["uptime"].config(text=_fmt_uptime(up))
 
+            # Identity fields live in /mesh/info, not /mesh/config
+            for key in ("long_name", "short_name"):
+                meta = self._mesh_cfg_vars.get(f"identity.{key}")
+                if meta:
+                    meta["var"].set(info.get(key, ""))
+
         if not cfg:
             return
+
+        # ── Config sections ─────────────────────────────────────────────────
         for var_key, meta in self._mesh_cfg_vars.items():
             section = meta["section"]
-            key     = meta["key"]
-            ftype   = meta["type"]
-            var     = meta["var"]
+            if section == "identity":
+                continue   # already handled above
+            key      = meta["key"]
+            ftype    = meta["type"]
+            var      = meta["var"]
             sec_data = cfg.get(section, {})
             if key not in sec_data:
                 continue
@@ -1208,6 +1219,11 @@ class App(tk.Tk):
         filters = cfg.get("packet_filters", {})
         for key, var in self._filter_vars.items():
             var.set(filters.get(key, True))
+        # Set send channel to first enabled channel
+        for ch in cfg.get("mesh_channels", []):
+            if ch.get("enabled"):
+                self._send_ch_var.set(str(ch["index"]))
+                break
 
     def _apply_config(self):
         current = _api_get("/config") or {}
