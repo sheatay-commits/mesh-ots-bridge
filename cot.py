@@ -1,7 +1,7 @@
 """CoT XML builder and parser for the Meshtastic ↔ OTS bridge."""
 
+import hashlib
 import re
-import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 
@@ -20,8 +20,10 @@ def _stale_str(minutes):
     return t.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def _uid(prefix="MESH"):
-    return f"{prefix}-{uuid.uuid4()}"
+def _stable_uid(*parts):
+    """Deterministic UID from parts — same marker never duplicates on the map."""
+    key = "-".join(str(p) for p in parts)
+    return "MESH-" + hashlib.md5(key.encode()).hexdigest()[:12].upper()
 
 
 # ---------------------------------------------------------------------------
@@ -61,13 +63,13 @@ def text_to_cot(packet, callsign, text):
     """Convert a Meshtastic text message to CoT GeoChat XML, or a map marker if [MRK] prefix."""
     m = _MRK_RE.match(text)
     if m:
-        return _marker_text_to_cot(m, packet)
+        return _marker_text_to_cot(m)
 
     node_id = f"!{packet.get('fromId', 'unknown').lstrip('!')}"
     sender = callsign or node_id
     root = ET.Element("event", {
         "version": "2.0",
-        "uid": _uid("GeoChat"),
+        "uid": _stable_uid("chat", node_id, text[:20]),
         "type": "b-t-f",
         "time": _now_str(),
         "start": _now_str(),
@@ -76,34 +78,37 @@ def text_to_cot(packet, callsign, text):
     })
     ET.SubElement(root, "point", lat="0", lon="0", hae="0", ce="9999999", le="9999999")
     detail = ET.SubElement(root, "detail")
-    chat = ET.SubElement(detail, "remarks", source=sender, time=_now_str())
-    chat.text = text
+    remarks = ET.SubElement(detail, "remarks", source=sender, time=_now_str())
+    remarks.text = text
     ET.SubElement(detail, "contact", callsign=sender)
     return ET.tostring(root, encoding="unicode")
 
 
-def _marker_text_to_cot(match, packet):
-    """Parse [MRK] text back into a b-m-p-s-m CoT map marker."""
-    lat = match.group("lat")
-    lon = match.group("lon")
+def _marker_text_to_cot(match):
+    """Parse [MRK] text back into a b-m-p-s-m CoT map marker for OTS."""
+    lat  = match.group("lat")
+    lon  = match.group("lon")
     name = match.group("name")
     callsign = match.group("callsign")
 
     root = ET.Element("event", {
         "version": "2.0",
-        "uid": _uid("MRK"),
+        # Stable UID: same callsign+name never creates a duplicate on the map
+        "uid": _stable_uid("mrk", callsign, name),
         "type": "b-m-p-s-m",
         "time": _now_str(),
         "start": _now_str(),
-        "stale": _stale_str(30),
+        "stale": _stale_str(525600),   # 1 year — persistent until manually deleted
         "how": "h-g-i-g-o",
     })
     ET.SubElement(root, "point", lat=lat, lon=lon, hae="0", ce="9999999", le="9999999")
     detail = ET.SubElement(root, "detail")
-    ET.SubElement(detail, "contact", callsign=callsign)
+    # contact callsign = what ATAK shows as the marker label
+    ET.SubElement(detail, "contact", callsign=name)
     ET.SubElement(detail, "usericon", iconsetpath="COT_MAPPING_SPOTMAP/b-m-p-s-m")
-    title = ET.SubElement(detail, "title")
-    title.text = name
+    remarks = ET.SubElement(detail, "remarks")
+    remarks.text = f"From {callsign} via Meshtastic"
+    ET.SubElement(detail, "archive")   # tells ATAK to keep it on the map persistently
     return ET.tostring(root, encoding="unicode")
 
 
@@ -113,8 +118,8 @@ def _marker_text_to_cot(match, packet):
 
 def parse_cot(xml_str):
     """
-    Parse a CoT XML string. Returns a dict:
-      {type, uid, lat, lon, alt, text, marker_name, raw_type}
+    Parse a CoT XML string. Returns a dict with keys:
+      raw_type, uid, lat, lon, alt, text, marker_name, sender_callsign
     Returns None if unparseable.
     """
     try:
@@ -123,37 +128,51 @@ def parse_cot(xml_str):
         return None
 
     cot_type = root.get("type", "")
-    point = root.find("point")
+    uid      = root.get("uid", "")
+    point    = root.find("point")
     lat = float(point.get("lat", 0)) if point is not None else 0.0
     lon = float(point.get("lon", 0)) if point is not None else 0.0
     alt = float(point.get("hae", 0)) if point is not None else 0.0
 
-    detail = root.find("detail")
-    text = None
-    marker_name = None
+    detail          = root.find("detail")
+    text            = None
+    marker_name     = None
+    sender_callsign = ""
 
     if detail is not None:
+        contact = detail.find("contact")
+        if contact is not None:
+            sender_callsign = contact.get("callsign", "")
+
         remarks = detail.find("remarks")
         if remarks is not None and remarks.text:
-            text = remarks.text
+            text = remarks.text.strip()
+
         title = detail.find("title")
         if title is not None and title.text:
-            marker_name = title.text
+            marker_name = title.text.strip()
+
+    # For markers, prefer contact callsign as the display name if no explicit title
+    if cot_type.startswith("b-m-p-") and not marker_name:
+        marker_name = sender_callsign or uid
 
     return {
-        "raw_type": cot_type,
-        "uid": root.get("uid", ""),
-        "lat": lat,
-        "lon": lon,
-        "alt": alt,
-        "text": text,
-        "marker_name": marker_name,
+        "raw_type":        cot_type,
+        "uid":             uid,
+        "lat":             lat,
+        "lon":             lon,
+        "alt":             alt,
+        "text":            text,
+        "marker_name":     marker_name,
+        "sender_callsign": sender_callsign,
     }
 
 
-def cot_to_marker_text(cot_dict, callsign="OTS"):
+def cot_to_marker_text(cot_dict, gateway_callsign="OTS"):
     """Serialize a b-m-p-* CoT marker to the [MRK] text format for the mesh."""
-    name = cot_dict.get("marker_name") or "Marker"
+    name     = cot_dict.get("marker_name") or cot_dict.get("sender_callsign") or "Marker"
+    # Use the actual sender callsign if available, fall back to gateway label
+    callsign = cot_dict.get("sender_callsign") or gateway_callsign
     lat = cot_dict["lat"]
     lon = cot_dict["lon"]
     return f"[MRK] !{callsign} {lat:.6f},{lon:.6f} {name}"
