@@ -150,7 +150,10 @@ class SerialIface:
 
         # Subscribe to incoming packets
         def on_receive(packet, interface):
-            self._on_receive(packet)
+            try:
+                self._on_receive(packet)
+            except Exception:
+                logger.error("on_receive error:\n%s", traceback.format_exc())
 
         try:
             pub.subscribe(on_receive, "meshtastic.receive")
@@ -172,8 +175,13 @@ class SerialIface:
                 iface = self._iface
             if iface is None:
                 break
-            # Detect disconnect: stream/socket closed underneath the iface
             try:
+                # SerialInterface: background send thread dying = disconnect
+                send_thread = getattr(iface, "_sendThread", None)
+                if send_thread is not None and not send_thread.is_alive():
+                    logger.warning("Meshtastic send thread died — disconnected")
+                    break
+                # TCPInterface / StreamInterface: stream closed = disconnect
                 stream = getattr(iface, "stream", None)
                 if stream and hasattr(stream, "closed") and stream.closed:
                     logger.warning("Meshtastic stream closed — disconnected")
