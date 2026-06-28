@@ -113,6 +113,18 @@ class App(tk.Tk):
                                    bg=PANEL, fg=ACCENT, font=self._mono_bold, padx=12)
         self._lbl_nodes.pack(side=tk.RIGHT, padx=8)
 
+        tk.Label(self._status_frame, text="│", bg=PANEL, fg=BORDER).pack(side=tk.RIGHT)
+
+        self._lbl_utc = tk.Label(self._status_frame, text="UTC --:--:--",
+                                 bg=PANEL, fg=SUBTEXT, font=self._mono_bold, padx=8)
+        self._lbl_utc.pack(side=tk.RIGHT)
+
+        self._lbl_local = tk.Label(self._status_frame, text="LCL --:--:--",
+                                   bg=PANEL, fg=TEXT, font=self._mono_bold, padx=8)
+        self._lbl_local.pack(side=tk.RIGHT)
+
+        self._tick_clock()
+
         # ── Notebook ────────────────────────────────────────────────────────
         style = ttk.Style(self)
         style.theme_use("clam")
@@ -291,6 +303,18 @@ class App(tk.Tk):
                            width=12, anchor=tk.W)
             lbl.grid(row=i//2, column=(i%2)*2+1, sticky=tk.W)
             self._home_labels[key] = lbl
+
+        # Mini node control buttons
+        ctrl = tk.Frame(frm, bg=PANEL)
+        ctrl.pack(fill=tk.X, padx=10, pady=(6, 4))
+        tk.Button(ctrl, text="↺ REBOOT", bg=DIM, fg=YELLOW, relief=tk.FLAT,
+                  cursor="hand2", font=self._small,
+                  highlightbackground=YELLOW, highlightthickness=1, padx=6,
+                  command=self._mesh_reboot).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(ctrl, text="⏻ SHUTDOWN", bg=DIM, fg=RED, relief=tk.FLAT,
+                  cursor="hand2", font=self._small,
+                  highlightbackground=RED, highlightthickness=1, padx=6,
+                  command=self._mesh_shutdown).pack(side=tk.LEFT)
 
     def _build_home_ots_panel(self, frm):
         tk.Label(frm, text="◈ OPENTAK SERVER", bg=PANEL, fg=ACCENT,
@@ -1211,6 +1235,14 @@ class App(tk.Tk):
         threading.Thread(target=post, daemon=True).start()
 
     # ── Polling ───────────────────────────────────────────────────────────────
+
+    def _tick_clock(self):
+        import datetime as _dt
+        now_local = _dt.datetime.now()
+        now_utc   = _dt.datetime.utcnow()
+        self._lbl_local.config(text=f"LCL {now_local.strftime('%H:%M:%S')}")
+        self._lbl_utc.config(  text=f"UTC {now_utc.strftime('%H:%M:%S')}")
+        self.after(1000, self._tick_clock)
 
     def _poll(self):
         threading.Thread(target=self._fetch_all, daemon=True).start()
