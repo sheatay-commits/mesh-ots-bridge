@@ -521,10 +521,10 @@ class App(tk.Tk):
         tk.Button(frm, text="[ APPLY & RESTART ]", bg=DIM, fg=ACCENT,
                   relief=tk.FLAT, cursor="hand2", font=self._mono_bold,
                   highlightbackground=ACCENT, highlightthickness=1,
-                  padx=12, ipady=4,
+                  padx=12,
                   command=self._apply_config
                   ).grid(row=len(fields), column=0, columnspan=3,
-                         pady=20, sticky=tk.W)
+                         pady=20, ipady=4, sticky=tk.W)
 
         tk.Label(tab,
                  text="  COT ALLOWED: comma-separated type prefixes  |  changes trigger service restart",
