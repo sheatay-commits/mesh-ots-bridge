@@ -178,5 +178,95 @@ def cot_to_marker_text(cot_dict, gateway_callsign="OTS"):
     return f"[MRK] !{callsign} {lat:.6f},{lon:.6f} {name}"
 
 
+def atak_plugin_to_cot(packet, decoded):
+    """
+    Decode a Meshtastic ATAK_PLUGIN packet (TAKPacket protobuf) into CoT XML.
+    Returns (xml_str, summary) or (None, summary) if not forwardable.
+    """
+    node_id = f"!{packet.get('fromId', 'unknown').lstrip('!')}"
+
+    # The meshtastic library decodes TAKPacket into decoded["atak"]
+    tak = decoded.get("atak", {})
+    if not tak:
+        return None, f"ATAK (raw) from {node_id}"
+
+    contact = tak.get("contact", {})
+    callsign = contact.get("callsign") or contact.get("deviceCallsign") or node_id
+
+    # --- PLI (position) ---
+    pli = tak.get("pli")
+    if pli:
+        lat = pli.get("latI", 0) / 1e7
+        lon = pli.get("lonI", 0) / 1e7
+        alt = pli.get("altitude", 0)
+        root = ET.Element("event", {
+            "version": "2.0",
+            "uid": _stable_uid("atak-pli", node_id),
+            "type": "a-f-G-U-C",
+            "time": _now_str(),
+            "start": _now_str(),
+            "stale": _stale_str(5),
+            "how": "m-g",
+        })
+        ET.SubElement(root, "point", lat=str(lat), lon=str(lon),
+                      hae=str(alt), ce="9999999", le="9999999")
+        detail = ET.SubElement(root, "detail")
+        ET.SubElement(detail, "contact", callsign=callsign)
+        return ET.tostring(root, encoding="unicode"), f"ATAK PLI from {callsign}"
+
+    # --- Chat ---
+    chat = tak.get("chat")
+    if chat:
+        msg = chat.get("message", "")
+        root = ET.Element("event", {
+            "version": "2.0",
+            "uid": _stable_uid("atak-chat", node_id, msg[:20]),
+            "type": "b-t-f",
+            "time": _now_str(),
+            "start": _now_str(),
+            "stale": _stale_str(5),
+            "how": "h-g-i-g-o",
+        })
+        ET.SubElement(root, "point", lat="0", lon="0", hae="0", ce="9999999", le="9999999")
+        d = ET.SubElement(root, "detail")
+        remarks = ET.SubElement(d, "remarks", source=callsign, time=_now_str())
+        remarks.text = msg
+        ET.SubElement(d, "contact", callsign=callsign)
+        return ET.tostring(root, encoding="unicode"), f'ATAK chat "{msg[:40]}" from {callsign}'
+
+    # --- Detail XML (markers, shapes, etc.) ---
+    detail_xml = tak.get("detail")
+    if detail_xml:
+        # detail is a raw XML fragment — wrap it in a full CoT event
+        try:
+            detail_el = ET.fromstring(f"<detail>{detail_xml}</detail>")
+            # Try to find a contact callsign inside the detail
+            inner_contact = detail_el.find(".//contact")
+            if inner_contact is not None:
+                callsign = inner_contact.get("callsign", callsign)
+            # Look for a point element
+            point_el = detail_el.find(".//point")
+            lat = point_el.get("lat", "0") if point_el is not None else "0"
+            lon = point_el.get("lon", "0") if point_el is not None else "0"
+            hae = point_el.get("hae", "0") if point_el is not None else "0"
+            root = ET.Element("event", {
+                "version": "2.0",
+                "uid": _stable_uid("atak-detail", node_id, detail_xml[:30]),
+                "type": "b-m-p-s-m",
+                "time": _now_str(),
+                "start": _now_str(),
+                "stale": _stale_str(525600),
+                "how": "h-g-i-g-o",
+            })
+            ET.SubElement(root, "point", lat=lat, lon=lon, hae=hae, ce="9999999", le="9999999")
+            root.append(detail_el)
+            ET.SubElement(detail_el, "archive")
+            return ET.tostring(root, encoding="unicode"), f"ATAK marker from {callsign}"
+        except ET.ParseError:
+            pass
+
+    return None, f"ATAK (unhandled) from {callsign}"
+
+
 def is_allowed(cot_type, allowed_prefixes):
     return any(cot_type.startswith(p) for p in allowed_prefixes)

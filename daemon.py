@@ -69,6 +69,9 @@ def on_mesh_receive(packet):
         user    = decoded.get("user", {})
         summary = f"NodeInfo: {user.get('longName') or user.get('shortName') or node_id}"
 
+    elif portnum == "ATAK_PLUGIN":
+        xml, summary = cot.atak_plugin_to_cot(packet, decoded)
+
     elif portnum and filters.get("other", True):
         # Catch-all: routing pings, range tests, admin, etc. — still shows "last heard"
         label = portnum.replace("_APP", "").replace("_", " ").title()
