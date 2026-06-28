@@ -23,7 +23,7 @@ class OTSClient:
         self._lock = threading.Lock()
         self._stop = threading.Event()
 
-        self._backoff_seq = [5, 10, 30, 60]
+        self._backoff_seq = [5, 5, 10, 10]
         self._backoff_idx = 0
 
     @property
