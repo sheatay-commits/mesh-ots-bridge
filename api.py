@@ -24,9 +24,17 @@ _state = {
 _traffic_log = deque(maxlen=500)
 _log_lock = threading.Lock()
 
-# References to live objects set by daemon
+# Per-node telemetry store: {node_id: {battery, voltage, air_util, ch_util, uptime, snr, rssi, last_heard, callsign}}
+_telemetry = {}
+_telemetry_lock = threading.Lock()
+
+# Airtime tracking
+_airtime_current = 0.0
+_airtime_peak    = 0.0
+_airtime_lock    = threading.Lock()
+
 _serial_iface = None
-_ots_client = None
+_ots_client   = None
 
 
 # ---------------------------------------------------------------------------
@@ -36,22 +44,54 @@ _ots_client = None
 def set_interfaces(serial_iface, ots_client):
     global _serial_iface, _ots_client
     _serial_iface = serial_iface
-    _ots_client = ots_client
+    _ots_client   = ots_client
 
 
 def update_state(**kwargs):
     _state.update(kwargs)
 
 
-def log_traffic(direction, summary, channel=None):
+def log_traffic(direction, summary, channel=None, portnum=None):
     """direction: 'mesh→ots' or 'ots→mesh'"""
     with _log_lock:
         _traffic_log.append({
-            "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            "time":      datetime.now(timezone.utc).strftime("%H:%M:%S"),
             "direction": direction,
-            "summary": summary,
-            "channel": channel,
+            "summary":   summary,
+            "channel":   channel,
+            "portnum":   portnum or "",
         })
+
+
+def update_telemetry(node_id, callsign, data):
+    """Called by daemon with parsed telemetry/nodeinfo/position data."""
+    global _airtime_current, _airtime_peak
+    with _telemetry_lock:
+        entry = _telemetry.setdefault(node_id, {
+            "node_id":   node_id,
+            "callsign":  callsign,
+            "battery":   None,
+            "voltage":   None,
+            "air_util":  None,
+            "ch_util":   None,
+            "uptime":    None,
+            "snr":       None,
+            "rssi":      None,
+            "lat":       None,
+            "lon":       None,
+            "last_heard": None,
+        })
+        entry.update({k: v for k, v in data.items() if v is not None})
+        entry["callsign"]   = callsign or entry["callsign"]
+        entry["last_heard"] = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
+    # Track airtime peak across all nodes
+    air = data.get("air_util")
+    if air is not None:
+        with _airtime_lock:
+            _airtime_current = air
+            if air > _airtime_peak:
+                _airtime_peak = air
 
 
 # ---------------------------------------------------------------------------
@@ -61,14 +101,19 @@ def log_traffic(direction, summary, channel=None):
 @app.route("/status")
 def status():
     cfg = config.get()
+    with _airtime_lock:
+        cur = _airtime_current
+        peak = _airtime_peak
     return jsonify({
         "serial_connected": _state["serial_connected"],
-        "serial_port": config.active_port(),
-        "serial_mode": cfg.get("serial_mode", "usb"),
-        "ots_connected": _state["ots_connected"],
-        "ots_host": cfg.get("ots_host"),
-        "ots_port": cfg.get("ots_port"),
-        "node_count": _state["node_count"],
+        "serial_port":      config.active_port(),
+        "serial_mode":      cfg.get("serial_mode", "usb"),
+        "ots_connected":    _state["ots_connected"],
+        "ots_host":         cfg.get("ots_host"),
+        "ots_port":         cfg.get("ots_port"),
+        "node_count":       _state["node_count"],
+        "airtime_current":  round(cur, 2),
+        "airtime_peak":     round(peak, 2),
     })
 
 
@@ -78,6 +123,12 @@ def traffic():
     with _log_lock:
         entries = list(_traffic_log)[-limit:]
     return jsonify(entries)
+
+
+@app.route("/telemetry")
+def telemetry():
+    with _telemetry_lock:
+        return jsonify(list(_telemetry.values()))
 
 
 @app.route("/config", methods=["GET"])
@@ -99,10 +150,10 @@ def nodes():
         for n in _serial_iface.get_nodes():
             user = n.get("user", {})
             result.append({
-                "id": n.get("num"),
-                "callsign": user.get("longName") or user.get("shortName") or "?",
+                "id":        n.get("num"),
+                "callsign":  user.get("longName") or user.get("shortName") or "?",
                 "lastHeard": n.get("lastHeard"),
-                "snr": n.get("snr"),
+                "snr":       n.get("snr"),
             })
     return jsonify(result)
 
@@ -118,9 +169,9 @@ def get_channels():
         idx = dch["index"]
         cfg = cfg_channels.get(idx, {})
         merged.append({
-            "index": idx,
-            "name": dch.get("name") or cfg.get("name") or f"Channel {idx}",
-            "psk": cfg.get("psk", "AQ=="),
+            "index":   idx,
+            "name":    dch.get("name") or cfg.get("name") or f"Channel {idx}",
+            "psk":     cfg.get("psk", "AQ=="),
             "enabled": cfg.get("enabled", idx == 0),
         })
     return jsonify(merged)

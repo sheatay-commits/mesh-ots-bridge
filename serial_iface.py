@@ -3,10 +3,10 @@
 import logging
 import threading
 import time
+import traceback
 
 logger = logging.getLogger(__name__)
 
-# Lazy import so the module loads on non-Pi systems without crashing
 try:
     import meshtastic.serial_interface
     import meshtastic.tcp_interface
@@ -22,6 +22,9 @@ class SerialIface:
     Connects to a Meshtastic device via one of three modes:
       - 'usb'  / 'uart' : serial port path e.g. /dev/ttyUSB0, /dev/ttyAMA0
       - 'tcp'            : TCP to meshtasticd, port is 'host:port' e.g. 'localhost:4403'
+
+    Connection detection does NOT use pubsub events — it checks iface.myInfo
+    directly after init, which is reliable across firmware versions.
     """
 
     def __init__(self, port, on_receive, on_connect=None, on_disconnect=None):
@@ -91,7 +94,7 @@ class SerialIface:
                     channels = []
                     for i in range(8):
                         ch = node.getChannelByChannelIndex(i)
-                        if ch and ch.role != 0:  # 0 = DISABLED
+                        if ch and ch.role != 0:
                             channels.append({
                                 "index": i,
                                 "name": ch.settings.name or f"Channel {i}",
@@ -111,11 +114,9 @@ class SerialIface:
             try:
                 self._connect()
                 self._backoff_idx = 0
-                # Block until disconnected or stopped
-                while self._connected and not self._stop.is_set():
-                    time.sleep(1)
-            except Exception as e:
-                logger.error("Connection error: %s", e)
+                self._watch()          # blocks until disconnected or stopped
+            except Exception:
+                logger.error("Connection error:\n%s", traceback.format_exc())
             finally:
                 self._close()
 
@@ -131,41 +132,75 @@ class SerialIface:
             raise RuntimeError("meshtastic not installed")
 
         logger.info("Connecting to Meshtastic on %s", self.port)
-        # TCP mode for meshtasticd (e.g. RAK HAT managed by the daemon)
+
         if ":" in self.port and not self.port.startswith("/"):
             host, _, tcp_port = self.port.partition(":")
-            iface = meshtastic.tcp_interface.TCPInterface(hostname=host, portNumber=int(tcp_port))
+            iface = meshtastic.tcp_interface.TCPInterface(
+                hostname=host, portNumber=int(tcp_port))
         else:
             iface = meshtastic.serial_interface.SerialInterface(devPath=self.port)
 
+        # Verify connection by checking myInfo — same check the CLI test uses
+        if not iface.myInfo:
+            iface.close()
+            raise RuntimeError("SerialInterface created but myInfo is empty — device not ready")
+
+        logger.info("Meshtastic connected on %s (node num: %s)",
+                    self.port, iface.myInfo.my_node_num)
+
+        # Subscribe to incoming packets
         def on_receive(packet, interface):
             self._on_receive(packet)
 
-        def on_connect(interface, topic=pub.AUTO_TOPIC):
-            self._connected = True
-            logger.info("Meshtastic connected on %s", self.port)
-            if self._on_connect:
-                self._on_connect()
+        try:
+            pub.subscribe(on_receive, "meshtastic.receive")
+        except Exception:
+            pass  # already subscribed from a previous attempt is fine
 
-        def on_disconnect(interface, topic=pub.AUTO_TOPIC):
+        with self._lock:
+            self._iface = iface
+            self._receive_cb = on_receive   # keep reference so we can unsubscribe
+
+        self._connected = True
+        if self._on_connect:
+            self._on_connect()
+
+    def _watch(self):
+        """Block until the device disconnects or stop is requested."""
+        while not self._stop.is_set():
+            with self._lock:
+                iface = self._iface
+            if iface is None:
+                break
+            # Detect disconnect: stream/socket closed underneath the iface
+            try:
+                stream = getattr(iface, "stream", None)
+                if stream and hasattr(stream, "closed") and stream.closed:
+                    logger.warning("Meshtastic stream closed — disconnected")
+                    break
+            except Exception:
+                break
+            time.sleep(2)
+
+        if self._connected:
             self._connected = False
             logger.warning("Meshtastic disconnected")
             if self._on_disconnect:
                 self._on_disconnect()
 
-        pub.subscribe(on_receive, "meshtastic.receive")
-        pub.subscribe(on_connect, "meshtastic.connection.established")
-        pub.subscribe(on_disconnect, "meshtastic.connection.lost")
-
-        with self._lock:
-            self._iface = iface
-
     def _close(self):
+        cb = None
         with self._lock:
+            cb = getattr(self, "_receive_cb", None)
             if self._iface:
                 try:
                     self._iface.close()
                 except Exception:
                     pass
                 self._iface = None
+        if cb:
+            try:
+                pub.unsubscribe(cb, "meshtastic.receive")
+            except Exception:
+                pass
         self._connected = False
