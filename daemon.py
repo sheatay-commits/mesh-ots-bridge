@@ -70,7 +70,8 @@ def on_mesh_receive(packet):
         summary = f"NodeInfo: {user.get('longName') or user.get('shortName') or node_id}"
 
     if summary:
-        api.log_traffic("mesh→ots", summary, channel=ch_name, portnum=portnum)
+        api.log_traffic("mesh→ots", summary, channel=ch_name, portnum=portnum,
+                        node_id=node_id, callsign=callsign)
         logger.debug("mesh→ots [ch%d] %s", channel_idx, summary)
 
     if xml and _ots:

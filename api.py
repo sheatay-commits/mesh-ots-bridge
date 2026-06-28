@@ -1,13 +1,19 @@
 """Flask REST API exposed on localhost:5199 for the GUI."""
 
+import csv
+import io
+import json
+import os
 import subprocess
 import threading
 from collections import deque
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 import config
+
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 
 app = Flask(__name__)
 
@@ -51,16 +57,29 @@ def update_state(**kwargs):
     _state.update(kwargs)
 
 
-def log_traffic(direction, summary, channel=None, portnum=None):
+def log_traffic(direction, summary, channel=None, portnum=None, node_id="", callsign=""):
     """direction: 'mesh→ots' or 'ots→mesh'"""
+    now_utc = datetime.now(timezone.utc)
+    entry = {
+        "time":      now_utc.strftime("%H:%M:%S"),
+        "direction": direction,
+        "summary":   summary,
+        "channel":   channel or "",
+        "portnum":   portnum or "",
+        "node_id":   node_id,
+        "callsign":  callsign,
+    }
     with _log_lock:
-        _traffic_log.append({
-            "time":      datetime.now(timezone.utc).strftime("%H:%M:%S"),
-            "direction": direction,
-            "summary":   summary,
-            "channel":   channel,
-            "portnum":   portnum or "",
-        })
+        _traffic_log.append(entry)
+    # Persist to daily log file
+    try:
+        os.makedirs(_LOG_DIR, exist_ok=True)
+        date_str = now_utc.strftime("%Y-%m-%d")
+        file_entry = dict(entry, time=now_utc.isoformat())
+        with open(os.path.join(_LOG_DIR, f"{date_str}.jsonl"), "a") as fh:
+            fh.write(json.dumps(file_entry) + "\n")
+    except Exception as exc:
+        app.logger.error("log_to_file failed: %s", exc)
 
 
 def update_telemetry(node_id, callsign, data):
@@ -202,6 +221,63 @@ def svc_stop():
 def svc_start():
     _run_systemctl("start")
     return jsonify({"ok": True})
+
+
+@app.route("/datalog")
+def datalog():
+    limit  = int(request.args.get("limit", 500))
+    date   = request.args.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    portnum_filter = request.args.get("portnum", "")
+    path   = os.path.join(_LOG_DIR, f"{date}.jsonl")
+    entries = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                e = json.loads(line)
+                if portnum_filter and e.get("portnum") != portnum_filter:
+                    continue
+                entries.append(e)
+    except FileNotFoundError:
+        pass
+    return jsonify(entries[-limit:])
+
+
+@app.route("/datalog/dates")
+def datalog_dates():
+    try:
+        dates = sorted(
+            f[:-6] for f in os.listdir(_LOG_DIR) if f.endswith(".jsonl")
+        )
+    except FileNotFoundError:
+        dates = []
+    return jsonify(dates)
+
+
+@app.route("/datalog/export")
+def datalog_export():
+    date = request.args.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    path = os.path.join(_LOG_DIR, f"{date}.jsonl")
+    entries = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
+    except FileNotFoundError:
+        pass
+    fields = ["time", "direction", "node_id", "callsign", "portnum", "channel", "summary"]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(entries)
+    return Response(
+        buf.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=mesh-log-{date}.csv"},
+    )
 
 
 def _run_systemctl(action):
