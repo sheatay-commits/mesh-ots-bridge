@@ -223,6 +223,20 @@ def svc_start():
     return jsonify({"ok": True})
 
 
+@app.route("/journal")
+def journal():
+    lines = int(request.args.get("lines", 200))
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "mesh-ots-bridge",
+             f"-n{lines}", "--no-pager", "-o", "short"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return jsonify({"lines": result.stdout.splitlines()})
+    except Exception as exc:
+        return jsonify({"lines": [], "error": str(exc)})
+
+
 @app.route("/datalog")
 def datalog():
     limit  = int(request.args.get("limit", 500))

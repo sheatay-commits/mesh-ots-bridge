@@ -134,7 +134,7 @@ class App(tk.Tk):
         self._nb.add(self._tab_telemetry, text="  Telemetry  ")
         self._nb.add(self._tab_channels,  text="  Channels  ")
         self._nb.add(self._tab_nodes,     text="  Nodes  ")
-        self._nb.add(self._tab_datalog,   text="  Data Log  ")
+        self._nb.add(self._tab_datalog,   text="  System Log  ")
         self._nb.add(self._tab_config,    text="  Config  ")
 
         self._build_main_tab()
@@ -472,184 +472,78 @@ class App(tk.Tk):
                 f"{n.get('snr', '?')} dB" if n.get("snr") is not None else "?",
             ))
 
-    # ── Data Log tab ──────────────────────────────────────────────────────────
+    # ── System Log tab ────────────────────────────────────────────────────────
 
     def _build_datalog_tab(self):
         tab = self._tab_datalog
-        self._datalog_date    = tk.StringVar()
-        self._datalog_filters = {}  # portnum key → BooleanVar
+        self._journal_autoscroll = tk.BooleanVar(value=True)
+        self._journal_last_lines = 0
 
-        # ── Header bar ──────────────────────────────────────────────────────
         hdr = tk.Frame(tab, bg=DIM, pady=5,
                        highlightbackground=BORDER, highlightthickness=1)
         hdr.pack(fill=tk.X)
-        tk.Label(hdr, text="◈ DATA LOG", bg=DIM, fg=ACCENT,
-                 font=self._mono_bold, padx=8).pack(side=tk.LEFT)
+        tk.Label(hdr, text="◈ SYSTEM LOG  (journalctl -u mesh-ots-bridge)",
+                 bg=DIM, fg=ACCENT, font=self._mono_bold, padx=8).pack(side=tk.LEFT)
 
-        tk.Button(hdr, text="[ EXPORT CSV ]", bg=DIM, fg=GREEN,
-                  relief=tk.FLAT, cursor="hand2", font=self._mono_bold,
-                  activeforeground=GREEN,
-                  command=self._datalog_export).pack(side=tk.RIGHT, padx=8)
-        tk.Button(hdr, text="[ RELOAD ]", bg=DIM, fg=ACCENT,
-                  relief=tk.FLAT, cursor="hand2", font=self._mono_bold,
-                  activeforeground=ACCENT,
-                  command=self._datalog_reload).pack(side=tk.RIGHT, padx=4)
+        tk.Button(hdr, text="[ CLEAR VIEW ]", bg=DIM, fg=SUBTEXT,
+                  relief=tk.FLAT, cursor="hand2", font=self._small,
+                  activeforeground=RED,
+                  command=self._journal_clear).pack(side=tk.RIGHT, padx=8)
+        tk.Checkbutton(hdr, text="Auto-scroll", variable=self._journal_autoscroll,
+                       bg=DIM, fg=TEXT, selectcolor=BG,
+                       activebackground=DIM, activeforeground=ACCENT,
+                       font=self._mono).pack(side=tk.RIGHT, padx=8)
 
-        # ── Filter bar ──────────────────────────────────────────────────────
-        fbar = tk.Frame(tab, bg=PANEL, pady=4,
-                        highlightbackground=BORDER, highlightthickness=1)
-        fbar.pack(fill=tk.X, padx=0, pady=(2, 0))
+        self._journal_text = tk.Text(tab, bg=BG, fg=TEXT, font=self._mono,
+                                     state=tk.DISABLED, relief=tk.FLAT,
+                                     wrap=tk.NONE,
+                                     insertbackground=ACCENT,
+                                     selectbackground=BORDER)
+        self._journal_text.tag_configure("err",  foreground=RED)
+        self._journal_text.tag_configure("warn", foreground=YELLOW)
+        self._journal_text.tag_configure("info", foreground=TEXT)
+        self._journal_text.tag_configure("dbg",  foreground=SUBTEXT)
 
-        tk.Label(fbar, text="DATE:", bg=PANEL, fg=SUBTEXT,
-                 font=self._mono).pack(side=tk.LEFT, padx=(12, 4))
-        self._datalog_date_menu = ttk.Combobox(fbar, textvariable=self._datalog_date,
-                                               width=12, state="readonly",
-                                               font=self._mono)
-        self._datalog_date_menu.pack(side=tk.LEFT, padx=4)
-        self._datalog_date_menu.bind("<<ComboboxSelected>>",
-                                     lambda _: self._datalog_reload())
+        sb_v = tk.Scrollbar(tab, command=self._journal_text.yview,
+                            bg=DIM, troughcolor=BG, width=10)
+        sb_h = tk.Scrollbar(tab, orient=tk.HORIZONTAL,
+                            command=self._journal_text.xview,
+                            bg=DIM, troughcolor=BG)
+        self._journal_text.configure(yscrollcommand=sb_v.set,
+                                     xscrollcommand=sb_h.set)
+        sb_v.pack(side=tk.RIGHT,  fill=tk.Y)
+        sb_h.pack(side=tk.BOTTOM, fill=tk.X)
+        self._journal_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        tk.Label(fbar, text="  SHOW:", bg=PANEL, fg=SUBTEXT,
-                 font=self._mono).pack(side=tk.LEFT, padx=(16, 4))
-        filter_defs = [
-            ("POSITION_APP",  "PLI"),
-            ("TEXT_MESSAGE_APP", "Text"),
-            ("TELEMETRY_APP", "Telemetry"),
-            ("NODEINFO_APP",  "NodeInfo"),
-        ]
-        for portnum, label in filter_defs:
-            var = tk.BooleanVar(value=True)
-            self._datalog_filters[portnum] = var
-            tk.Checkbutton(fbar, text=label, variable=var,
-                           bg=PANEL, fg=TEXT, selectcolor=BG,
-                           activebackground=PANEL, activeforeground=ACCENT,
-                           font=self._mono,
-                           command=self._datalog_apply_filter).pack(side=tk.LEFT, padx=6)
-
-        self._datalog_count_lbl = tk.Label(fbar, text="0 entries",
-                                           bg=PANEL, fg=SUBTEXT, font=self._small)
-        self._datalog_count_lbl.pack(side=tk.RIGHT, padx=12)
-
-        # ── Treeview ────────────────────────────────────────────────────────
-        cols = ("Time", "Dir", "Node", "Callsign", "Type", "Channel", "Summary")
-        col_widths = (135, 80, 95, 110, 125, 90, 340)
-
-        style = ttk.Style()
-        style.configure("DataLog.Treeview",
-                        background=BG, foreground=TEXT,
-                        fieldbackground=BG, rowheight=24,
-                        font=("Courier New", 9))
-        style.configure("DataLog.Treeview.Heading",
-                        background=DIM, foreground=ACCENT,
-                        font=("Courier New", 9, "bold"))
-        style.map("DataLog.Treeview",
-                  background=[("selected", BORDER)],
-                  foreground=[("selected", ACCENT)])
-
-        frame = tk.Frame(tab, bg=BG)
-        frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-
-        self._datalog_tree = ttk.Treeview(frame, columns=cols, show="headings",
-                                          style="DataLog.Treeview")
-        for col, w in zip(cols, col_widths):
-            self._datalog_tree.heading(col, text=col.upper())
-            self._datalog_tree.column(col, width=w,
-                                      anchor=tk.CENTER if col != "Summary" else tk.W)
-
-        vsb = ttk.Scrollbar(frame, orient=tk.VERTICAL,   command=self._datalog_tree.yview)
-        hsb = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=self._datalog_tree.xview)
-        self._datalog_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        self._datalog_tree.tag_configure("mesh",  foreground=GREEN)
-        self._datalog_tree.tag_configure("ots",   foreground=BLUE)
-        self._datalog_tree.tag_configure("telem", foreground=ORANGE)
-        self._datalog_tree.tag_configure("info",  foreground=SUBTEXT)
-
-        vsb.pack(side=tk.RIGHT,  fill=tk.Y)
-        hsb.pack(side=tk.BOTTOM, fill=tk.X)
-        self._datalog_tree.pack(fill=tk.BOTH, expand=True)
-
-        self._datalog_entries = []  # full list, pre-filter
-
-    def _datalog_reload(self):
-        date = self._datalog_date.get()
-        if not date:
+    def _journal_update(self, lines):
+        if len(lines) == self._journal_last_lines:
             return
-        def fetch():
-            data = _api_get(f"/datalog?limit=2000&date={date}")
-            if data is not None:
-                self.after(0, lambda: self._datalog_populate(data))
-        threading.Thread(target=fetch, daemon=True).start()
-
-    def _datalog_populate(self, entries):
-        self._datalog_entries = entries
-        self._datalog_apply_filter()
-
-    def _datalog_apply_filter(self):
-        enabled = {k for k, v in self._datalog_filters.items() if v.get()}
-        self._datalog_tree.delete(*self._datalog_tree.get_children())
-        shown = 0
-        for e in self._datalog_entries:
-            portnum = e.get("portnum", "")
-            if portnum and portnum not in enabled:
-                continue
-            direction = e.get("direction", "")
-            if portnum == "TELEMETRY_APP":
-                tag = "telem"
-            elif portnum == "NODEINFO_APP":
-                tag = "info"
-            elif direction.startswith("mesh"):
-                tag = "mesh"
+        self._journal_last_lines = len(lines)
+        self._journal_text.config(state=tk.NORMAL)
+        self._journal_text.delete("1.0", tk.END)
+        for line in lines:
+            lo = line.lower()
+            if "error" in lo or "traceback" in lo or "exception" in lo:
+                tag = "err"
+            elif "warning" in lo or "warn" in lo:
+                tag = "warn"
+            elif "debug" in lo:
+                tag = "dbg"
             else:
-                tag = "ots"
-            t = e.get("time", "")
-            # ISO timestamp → display just HH:MM:SS
-            if "T" in t:
-                t = t[11:19]
-            self._datalog_tree.insert("", tk.END, tags=(tag,), values=(
-                t,
-                "↑ mesh" if direction.startswith("mesh") else "↓ ots",
-                e.get("node_id", ""),
-                e.get("callsign", ""),
-                portnum.replace("_APP", "") if portnum else "--",
-                e.get("channel", ""),
-                e.get("summary", ""),
-            ))
-            shown += 1
-        self._datalog_count_lbl.config(text=f"{shown} entries")
-        if shown:
-            last = self._datalog_tree.get_children()[-1]
-            self._datalog_tree.see(last)
+                tag = "info"
+            self._journal_text.insert(tk.END, line + "\n", tag)
+        if self._journal_autoscroll.get():
+            self._journal_text.see(tk.END)
+        self._journal_text.config(state=tk.DISABLED)
 
-    def _datalog_export(self):
-        date = self._datalog_date.get()
-        if not date:
-            return
-        import urllib.parse
-        def fetch():
-            try:
-                url = f"{API}/datalog/export?date={urllib.parse.quote(date)}"
-                with urllib.request.urlopen(url, timeout=10) as r:
-                    csv_bytes = r.read()
-                import os
-                path = os.path.expanduser(f"~/mesh-log-{date}.csv")
-                with open(path, "wb") as fh:
-                    fh.write(csv_bytes)
-                self.after(0, lambda: messagebox.showinfo(
-                    "Exported", f"Saved to {path}"))
-            except Exception as exc:
-                self.after(0, lambda: messagebox.showerror("Export failed", str(exc)))
-        threading.Thread(target=fetch, daemon=True).start()
+    def _journal_clear(self):
+        self._journal_text.config(state=tk.NORMAL)
+        self._journal_text.delete("1.0", tk.END)
+        self._journal_text.config(state=tk.DISABLED)
+        self._journal_last_lines = 0
 
     def _datalog_refresh_dates(self):
-        def fetch():
-            dates = _api_get("/datalog/dates") or []
-            def apply():
-                self._datalog_date_menu["values"] = dates
-                if dates and not self._datalog_date.get():
-                    self._datalog_date.set(dates[-1])
-                    self._datalog_reload()
-            self.after(0, apply)
-        threading.Thread(target=fetch, daemon=True).start()
+        pass  # no-op; kept for startup call compatibility
 
     # ── Config tab ────────────────────────────────────────────────────────────
 
@@ -763,24 +657,20 @@ class App(tk.Tk):
 
     # ── Polling ───────────────────────────────────────────────────────────────
 
-    _datalog_date_tick = 0
-
     def _poll(self):
         threading.Thread(target=self._fetch_all, daemon=True).start()
-        self._datalog_date_tick += 1
-        if self._datalog_date_tick % 30 == 0:  # every ~60s
-            self._datalog_refresh_dates()
         self.after(POLL_MS, self._poll)
 
     def _fetch_all(self):
-        status   = _api_get("/status")
-        traffic  = _api_get("/traffic?limit=200")
-        nodes    = _api_get("/nodes")
-        cfg      = _api_get("/config")
+        status    = _api_get("/status")
+        traffic   = _api_get("/traffic?limit=200")
+        nodes     = _api_get("/nodes")
+        cfg       = _api_get("/config")
         telemetry = _api_get("/telemetry")
-        self.after(0, lambda: self._apply_updates(status, traffic, nodes, cfg, telemetry))
+        journal   = _api_get("/journal?lines=300")
+        self.after(0, lambda: self._apply_updates(status, traffic, nodes, cfg, telemetry, journal))
 
-    def _apply_updates(self, status, traffic, nodes, cfg, telemetry):
+    def _apply_updates(self, status, traffic, nodes, cfg, telemetry, journal):
         self._update_status_bar(status)
         if traffic  is not None: self._update_traffic(traffic)
         if nodes    is not None: self._update_nodes(nodes)
@@ -789,6 +679,7 @@ class App(tk.Tk):
             if self._serial_mode.get() != cfg.get("serial_mode", "usb"):
                 self._serial_mode.set(cfg.get("serial_mode", "usb"))
         if telemetry is not None: self._update_telemetry(telemetry)
+        if journal   is not None: self._journal_update(journal.get("lines", []))
 
     def _update_status_bar(self, status):
         if not status:
