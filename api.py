@@ -232,6 +232,53 @@ def svc_start():
     return jsonify({"ok": True})
 
 
+@app.route("/sysinfo")
+def sysinfo():
+    result = {
+        "cpu": None, "ram_percent": None,
+        "ram_used_mb": None, "ram_total_mb": None,
+        "uptime": None, "internet": None,
+    }
+    # CPU + RAM via psutil (preferred) or /proc fallback
+    try:
+        import psutil as _ps
+        result["cpu"] = _ps.cpu_percent(interval=0.1)
+        vm = _ps.virtual_memory()
+        result["ram_percent"]  = round(vm.percent, 1)
+        result["ram_used_mb"]  = vm.used  >> 20
+        result["ram_total_mb"] = vm.total >> 20
+    except ImportError:
+        try:
+            mem = {}
+            with open("/proc/meminfo") as fh:
+                for line in fh:
+                    k, v = line.split(":")
+                    mem[k.strip()] = int(v.strip().split()[0])
+            total = mem.get("MemTotal", 0)
+            avail = mem.get("MemAvailable", 0)
+            used  = total - avail
+            result["ram_used_mb"]  = used  // 1024
+            result["ram_total_mb"] = total // 1024
+            result["ram_percent"]  = round(used / total * 100, 1) if total else 0
+        except Exception:
+            pass
+    # Pi uptime
+    try:
+        with open("/proc/uptime") as fh:
+            result["uptime"] = int(float(fh.read().split()[0]))
+    except Exception:
+        pass
+    # Internet (quick socket probe, 0.5s timeout)
+    try:
+        import socket as _sock
+        conn = _sock.create_connection(("8.8.8.8", 53), timeout=0.5)
+        conn.close()
+        result["internet"] = True
+    except Exception:
+        result["internet"] = False
+    return jsonify(result)
+
+
 @app.route("/stats")
 def stats():
     with _stats_lock:

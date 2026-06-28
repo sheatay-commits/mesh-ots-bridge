@@ -148,7 +148,7 @@ class App(tk.Tk):
         self._tab_datalog   = tk.Frame(self._nb, bg=BG)
         self._tab_config    = tk.Frame(self._nb, bg=BG)
 
-        self._nb.add(self._tab_main,      text="  Traffic  ")
+        self._nb.add(self._tab_main,      text="  Overview  ")
         self._nb.add(self._tab_telemetry, text="  Telemetry  ")
         self._nb.add(self._tab_channels,  text="  Channels  ")
         self._nb.add(self._tab_nodes,     text="  Nodes  ")
@@ -186,8 +186,12 @@ class App(tk.Tk):
         self._build_home_ots_panel(op)
 
         sp = tk.Frame(top, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
-        sp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
         self._build_send_panel(sp)
+
+        pp = tk.Frame(top, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        pp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._build_pi_panel(pp)
 
         # ── Bottom: controls + traffic log ───────────────────────────────────
         bottom = tk.Frame(tab, bg=BG)
@@ -369,6 +373,55 @@ class App(tk.Tk):
         self._send_status = tk.Label(inner, text="", bg=PANEL, fg=SUBTEXT,
                                      font=self._small)
         self._send_status.pack(anchor=tk.W, pady=(4, 0))
+
+    def _build_pi_panel(self, frm):
+        tk.Label(frm, text="◈ RASPBERRY PI", bg=PANEL, fg=ACCENT,
+                 font=self._mono_bold, padx=8, pady=4).pack(anchor=tk.W)
+        grid = tk.Frame(frm, bg=PANEL)
+        grid.pack(fill=tk.X, padx=10, pady=2)
+        self._pi_labels = {}
+        rows = [
+            ("lcl",      "Local Time"),
+            ("utc",      "UTC Time"),
+            ("uptime",   "Pi Uptime"),
+            ("cpu",      "CPU"),
+            ("ram",      "RAM"),
+            ("internet", "Internet"),
+        ]
+        for i, (key, label) in enumerate(rows):
+            tk.Label(grid, text=f"{label}:", bg=PANEL, fg=SUBTEXT,
+                     font=self._small, width=11, anchor=tk.W
+                     ).grid(row=i, column=0, sticky=tk.W, pady=1)
+            lbl = tk.Label(grid, text="--", bg=PANEL, fg=TEXT, font=self._mono)
+            lbl.grid(row=i, column=1, sticky=tk.W, padx=4)
+            self._pi_labels[key] = lbl
+
+    def _update_pi_panel(self, info):
+        if not info:
+            return
+        cpu = info.get("cpu")
+        ram_pct = info.get("ram_percent")
+        ram_used = info.get("ram_used_mb")
+        ram_total = info.get("ram_total_mb")
+        up = info.get("uptime")
+        inet = info.get("internet")
+
+        self._pi_labels["cpu"].config(
+            text=f"{cpu:.1f}%" if cpu is not None else "--",
+            fg=RED if cpu is not None and cpu > 80 else
+               YELLOW if cpu is not None and cpu > 50 else TEXT)
+
+        if ram_pct is not None and ram_used is not None:
+            self._pi_labels["ram"].config(
+                text=f"{ram_pct:.0f}%  ({ram_used}MB/{ram_total}MB)",
+                fg=RED if ram_pct > 80 else YELLOW if ram_pct > 60 else TEXT)
+        else:
+            self._pi_labels["ram"].config(text="--", fg=TEXT)
+
+        self._pi_labels["uptime"].config(text=_fmt_uptime(up) if up else "--")
+        self._pi_labels["internet"].config(
+            text="● ONLINE" if inet else "● OFFLINE",
+            fg=GREEN if inet else RED)
 
     # ── Home panel updates ────────────────────────────────────────────────────
 
@@ -1256,8 +1309,13 @@ class App(tk.Tk):
         import datetime as _dt
         now_local = _dt.datetime.now()
         now_utc   = _dt.datetime.utcnow()
-        self._lbl_local.config(text=f"LCL {now_local.strftime('%H:%M:%S')}")
-        self._lbl_utc.config(  text=f"UTC {now_utc.strftime('%H:%M:%S')}")
+        lcl_str = now_local.strftime("%H:%M:%S")
+        utc_str = now_utc.strftime("%H:%M:%S")
+        self._lbl_local.config(text=f"LCL {lcl_str}")
+        self._lbl_utc.config(  text=f"UTC {utc_str}")
+        if hasattr(self, "_pi_labels"):
+            self._pi_labels["lcl"].config(text=lcl_str, fg=TEXT)
+            self._pi_labels["utc"].config(text=utc_str, fg=SUBTEXT)
         self.after(1000, self._tick_clock)
 
     def _poll(self):
@@ -1272,10 +1330,11 @@ class App(tk.Tk):
         telemetry = _api_get("/telemetry")
         journal   = _api_get("/journal?lines=300")
         stats     = _api_get("/stats")
+        sysinfo   = _api_get("/sysinfo")
         self.after(0, lambda: self._apply_updates(
-            status, traffic, nodes, cfg, telemetry, journal, stats))
+            status, traffic, nodes, cfg, telemetry, journal, stats, sysinfo))
 
-    def _apply_updates(self, status, traffic, nodes, cfg, telemetry, journal, stats):
+    def _apply_updates(self, status, traffic, nodes, cfg, telemetry, journal, stats, sysinfo=None):
         self._update_status_bar(status)
         if traffic  is not None: self._update_traffic(traffic)
         if nodes    is not None: self._update_nodes(nodes)
@@ -1287,6 +1346,7 @@ class App(tk.Tk):
         if journal   is not None: self._journal_update(journal.get("lines", []))
         self._update_ots_tab(status, cfg, stats)
         self._update_home_panels(status, cfg, stats)
+        if sysinfo is not None: self._update_pi_panel(sysinfo)
 
         # Auto-populate Node Config and home device panel on connect
         serial_now = status.get("serial_connected", False) if status else False
