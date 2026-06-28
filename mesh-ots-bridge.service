@@ -1,7 +1,6 @@
 [Unit]
 Description=Meshtastic to OpenTakServer Bridge
-After=network.target
-# Soft dependency — bridge starts even if OTS isn't a systemd service
+After=network.target opentakserver.service
 Wants=opentakserver.service
 
 [Service]
@@ -9,8 +8,8 @@ Type=simple
 User=ss
 WorkingDirectory=/opt/mesh-ots-bridge
 ExecStart=/usr/bin/python3 /opt/mesh-ots-bridge/daemon.py
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
