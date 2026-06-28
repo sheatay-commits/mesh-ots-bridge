@@ -69,6 +69,11 @@ def on_mesh_receive(packet):
         user    = decoded.get("user", {})
         summary = f"NodeInfo: {user.get('longName') or user.get('shortName') or node_id}"
 
+    elif portnum and filters.get("other", True):
+        # Catch-all: routing pings, range tests, admin, etc. — still shows "last heard"
+        label = portnum.replace("_APP", "").replace("_", " ").title()
+        summary = f"{label} from {callsign}"
+
     if summary:
         api.log_traffic("mesh→ots", summary, channel=ch_name, portnum=portnum,
                         node_id=node_id, callsign=callsign)
