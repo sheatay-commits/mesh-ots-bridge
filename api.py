@@ -274,6 +274,22 @@ def mesh_owner():
     return jsonify({"ok": ok})
 
 
+@app.route("/mesh/send_text", methods=["POST"])
+def mesh_send_text():
+    data    = request.get_json(force=True)
+    text    = data.get("text", "").strip()
+    channel = int(data.get("channel", 0))
+    if not text:
+        return jsonify({"error": "empty message"}), 400
+    if not _serial_iface:
+        return jsonify({"error": "not connected"}), 503
+    ok = _serial_iface.send_text(text, channel_index=channel)
+    if ok:
+        log_traffic("mesh→ots", f'[TEST MSG] "{text}"',
+                    portnum="TEXT_MESSAGE_APP", channel=f"Ch{channel}")
+    return jsonify({"ok": ok})
+
+
 @app.route("/mesh/reboot", methods=["POST"])
 def mesh_reboot():
     if not _serial_iface:

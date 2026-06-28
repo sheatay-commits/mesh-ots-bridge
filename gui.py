@@ -70,9 +70,12 @@ class App(tk.Tk):
         self._heading   = tkfont.Font(family="Courier New",    size=11, weight="bold")
         self._small     = tkfont.Font(family="Courier New",    size=8)
 
-        self._filter_vars = {}   # packet filter checkboxes
+        self._filter_vars = {}
         self._last_traffic_count = 0
         self._journal_last_line  = ""
+        self._prev_serial_connected = False
+        self._spin_running = False
+        self._spin_idx     = 0
 
         self._build_ui()
         self._poll()
@@ -151,13 +154,35 @@ class App(tk.Tk):
         self._build_datalog_tab()
         self._build_config_tab()
 
-    # ── Traffic tab ───────────────────────────────────────────────────────────
+    # ── Traffic / Home tab ────────────────────────────────────────────────────
+
+    _SPIN_FRAMES = ("◐", "◓", "◑", "◒")
 
     def _build_main_tab(self):
         tab = self._tab_main
 
+        # ── Top home panels ──────────────────────────────────────────────────
+        top = tk.Frame(tab, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 2))
+
+        dp = tk.Frame(top, bg=PANEL, highlightbackground=ACCENT, highlightthickness=1)
+        dp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
+        self._build_device_panel(dp)
+
+        op = tk.Frame(top, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        op.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
+        self._build_home_ots_panel(op)
+
+        sp = tk.Frame(top, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        sp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._build_send_panel(sp)
+
+        # ── Bottom: controls + traffic log ───────────────────────────────────
+        bottom = tk.Frame(tab, bg=BG)
+        bottom.pack(fill=tk.BOTH, expand=True)
+
         # ── Left panel ──────────────────────────────────────────────────────
-        left = tk.Frame(tab, bg=PANEL, width=230,
+        left = tk.Frame(bottom, bg=PANEL, width=230,
                         highlightbackground=BORDER, highlightthickness=1)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 2))
         left.pack_propagate(False)
@@ -177,12 +202,9 @@ class App(tk.Tk):
 
         _separator(left)
         _section(left, "[ SERVICE ]")
-        btn_defs = [
-            ("▶  START",   "start",   GREEN),
-            ("■  STOP",    "stop",    RED),
-            ("↺  RESTART", "restart", ACCENT),
-        ]
-        for lbl, action, color in btn_defs:
+        for lbl, action, color in [("▶  START","start",GREEN),
+                                    ("■  STOP","stop",RED),
+                                    ("↺  RESTART","restart",ACCENT)]:
             tk.Button(left, text=lbl, bg=DIM, fg=color, relief=tk.FLAT,
                       activebackground=BORDER, activeforeground=color,
                       font=self._mono_bold, cursor="hand2", bd=0,
@@ -192,14 +214,9 @@ class App(tk.Tk):
 
         _separator(left)
         _section(left, "[ PACKET FILTERS ]")
-        filter_defs = [
-            ("position",  "Position / PLI"),
-            ("text",      "Text Messages"),
-            ("telemetry", "Telemetry"),
-            ("nodeinfo",  "Node Info"),
-            ("markers",   "Map Markers"),
-        ]
-        for key, label in filter_defs:
+        for key, label in [("position","Position / PLI"),("text","Text Messages"),
+                            ("telemetry","Telemetry"),("nodeinfo","Node Info"),
+                            ("markers","Map Markers")]:
             var = tk.BooleanVar(value=True)
             self._filter_vars[key] = var
             tk.Checkbutton(left, text=label, variable=var,
@@ -207,7 +224,6 @@ class App(tk.Tk):
                            activebackground=PANEL, activeforeground=ACCENT,
                            font=self._mono,
                            command=self._apply_filters).pack(anchor=tk.W, padx=16, pady=1)
-
         tk.Button(left, text="APPLY FILTERS", bg=DIM, fg=ACCENT,
                   relief=tk.FLAT, cursor="hand2", font=self._mono_bold,
                   highlightbackground=ACCENT, highlightthickness=1,
@@ -215,7 +231,7 @@ class App(tk.Tk):
                   ).pack(fill=tk.X, padx=16, pady=(6, 4), ipady=3)
 
         # ── Right panel: traffic log ─────────────────────────────────────────
-        right = tk.Frame(tab, bg=BG)
+        right = tk.Frame(bottom, bg=BG)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         hdr = tk.Frame(right, bg=DIM, pady=4,
@@ -233,19 +249,179 @@ class App(tk.Tk):
                                      wrap=tk.NONE, height=20,
                                      insertbackground=ACCENT,
                                      selectbackground=BORDER)
-        self._traffic_text.tag_configure("mesh",   foreground=GREEN)
-        self._traffic_text.tag_configure("ots",    foreground=BLUE)
-        self._traffic_text.tag_configure("telem",  foreground=ORANGE)
-        self._traffic_text.tag_configure("info",   foreground=SUBTEXT)
-        self._traffic_text.tag_configure("time",   foreground=SUBTEXT)
-        self._traffic_text.tag_configure("chan",   foreground=YELLOW)
-        self._traffic_text.tag_configure("arrow",  foreground=ACCENT)
+        self._traffic_text.tag_configure("mesh",  foreground=GREEN)
+        self._traffic_text.tag_configure("ots",   foreground=BLUE)
+        self._traffic_text.tag_configure("telem", foreground=ORANGE)
+        self._traffic_text.tag_configure("info",  foreground=SUBTEXT)
+        self._traffic_text.tag_configure("time",  foreground=SUBTEXT)
+        self._traffic_text.tag_configure("chan",  foreground=YELLOW)
+        self._traffic_text.tag_configure("arrow", foreground=ACCENT)
 
         sb = tk.Scrollbar(right, command=self._traffic_text.yview,
                           bg=DIM, troughcolor=BG, width=10)
         self._traffic_text.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self._traffic_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+    def _build_device_panel(self, frm):
+        tk.Label(frm, text="◈ DEVICE STATUS", bg=PANEL, fg=ACCENT,
+                 font=self._mono_bold, padx=8, pady=4).pack(anchor=tk.W)
+
+        # Spinner + name row
+        top_row = tk.Frame(frm, bg=PANEL)
+        top_row.pack(fill=tk.X, padx=10, pady=(0,4))
+        self._home_spin = tk.Label(top_row, text="◌", bg=PANEL, fg=SUBTEXT,
+                                   font=tkfont.Font(family="Courier New", size=16, weight="bold"))
+        self._home_spin.pack(side=tk.LEFT, padx=(0, 8))
+        self._home_name = tk.Label(top_row, text="--", bg=PANEL, fg=TEXT,
+                                   font=self._mono_bold)
+        self._home_name.pack(side=tk.LEFT)
+
+        # Stats grid
+        grid = tk.Frame(frm, bg=PANEL)
+        grid.pack(fill=tk.X, padx=10, pady=2)
+        self._home_labels = {}
+        fields = [("firmware","Firmware"),("battery","Battery"),
+                  ("voltage","Voltage"),("uptime","Uptime")]
+        for i, (key, label) in enumerate(fields):
+            tk.Label(grid, text=f"{label}:", bg=PANEL, fg=SUBTEXT,
+                     font=self._small, width=9, anchor=tk.W).grid(
+                         row=i//2, column=(i%2)*2, sticky=tk.W, pady=1)
+            lbl = tk.Label(grid, text="--", bg=PANEL, fg=TEXT, font=self._mono,
+                           width=12, anchor=tk.W)
+            lbl.grid(row=i//2, column=(i%2)*2+1, sticky=tk.W)
+            self._home_labels[key] = lbl
+
+    def _build_home_ots_panel(self, frm):
+        tk.Label(frm, text="◈ OPENTAK SERVER", bg=PANEL, fg=ACCENT,
+                 font=self._mono_bold, padx=8, pady=4).pack(anchor=tk.W)
+        grid = tk.Frame(frm, bg=PANEL)
+        grid.pack(fill=tk.X, padx=10, pady=4)
+        self._home_ots = {}
+        fields = [("status","Status"),("host","Host"),("port","Port"),
+                  ("ssl","SSL"),("ots_rx","CoT RX"),("mesh_rx","Mesh RX")]
+        for i, (key, label) in enumerate(fields):
+            tk.Label(grid, text=f"{label}:", bg=PANEL, fg=SUBTEXT,
+                     font=self._small, width=9, anchor=tk.W).grid(
+                         row=i, column=0, sticky=tk.W, pady=1, padx=(0,4))
+            lbl = tk.Label(grid, text="--", bg=PANEL, fg=TEXT, font=self._mono)
+            lbl.grid(row=i, column=1, sticky=tk.W)
+            self._home_ots[key] = lbl
+
+    def _build_send_panel(self, frm):
+        tk.Label(frm, text="◈ SEND TEST MESSAGE", bg=PANEL, fg=ACCENT,
+                 font=self._mono_bold, padx=8, pady=4).pack(anchor=tk.W)
+
+        inner = tk.Frame(frm, bg=PANEL)
+        inner.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+
+        tk.Label(inner, text="Message:", bg=PANEL, fg=SUBTEXT,
+                 font=self._small).pack(anchor=tk.W)
+        self._send_text_var = tk.StringVar()
+        self._send_entry = tk.Entry(inner, textvariable=self._send_text_var,
+                                    bg=BORDER, fg=TEXT, insertbackground=ACCENT,
+                                    relief=tk.FLAT, font=self._mono,
+                                    highlightbackground=SUBTEXT, highlightthickness=1)
+        self._send_entry.pack(fill=tk.X, pady=(2, 6))
+        self._send_entry.bind("<Return>", lambda _: self._send_message())
+
+        ch_row = tk.Frame(inner, bg=PANEL)
+        ch_row.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(ch_row, text="Channel:", bg=PANEL, fg=SUBTEXT,
+                 font=self._small).pack(side=tk.LEFT)
+        self._send_ch_var = tk.StringVar(value="0")
+        self._send_ch_spin = tk.Spinbox(ch_row, textvariable=self._send_ch_var,
+                                        from_=0, to=7, width=4,
+                                        bg=BORDER, fg=TEXT, buttonbackground=DIM,
+                                        insertbackground=ACCENT, relief=tk.FLAT,
+                                        font=self._mono)
+        self._send_ch_spin.pack(side=tk.LEFT, padx=6)
+
+        tk.Button(inner, text="[ SEND ]", bg=DIM, fg=GREEN,
+                  relief=tk.FLAT, cursor="hand2", font=self._mono_bold,
+                  highlightbackground=GREEN, highlightthickness=1, padx=10,
+                  command=self._send_message).pack(anchor=tk.W)
+
+        self._send_status = tk.Label(inner, text="", bg=PANEL, fg=SUBTEXT,
+                                     font=self._small)
+        self._send_status.pack(anchor=tk.W, pady=(4, 0))
+
+    # ── Home panel updates ────────────────────────────────────────────────────
+
+    def _update_home_panels(self, status, cfg, stats):
+        # Device status
+        serial_on = status.get("serial_connected", False) if status else False
+        if serial_on:
+            if not self._spin_running:
+                self._spin_start()
+        else:
+            self._spin_stop()
+
+        # OTS panel (home + OTS tab)
+        if status:
+            connected = status.get("ots_connected", False)
+            ots_color = GREEN if connected else RED
+            ots_text  = "● CONNECTED" if connected else "● DISCONNECTED"
+            self._home_ots["status"].config(text=ots_text, fg=ots_color)
+            self._home_ots["host"].config(text=status.get("ots_host","--"))
+            self._home_ots["port"].config(text=str(status.get("ots_port","--")))
+        if cfg:
+            self._home_ots["ssl"].config(text="YES" if cfg.get("ots_ssl") else "NO")
+        if stats:
+            self._home_ots["ots_rx"].config(text=f"{stats.get('ots_rx',0):,}")
+            self._home_ots["mesh_rx"].config(text=f"{stats.get('mesh_rx',0):,}")
+
+    def _update_home_device(self, info):
+        if not info:
+            return
+        bat  = info.get("battery")
+        volt = info.get("voltage")
+        up   = info.get("uptime")
+        self._home_name.config(text=info.get("long_name","--") or "--")
+        self._home_labels["firmware"].config(text=info.get("firmware","--") or "--")
+        self._home_labels["battery"].config(
+            text=f"{bat}%" if bat is not None else "--",
+            fg=RED if bat is not None and bat < 20 else TEXT)
+        self._home_labels["voltage"].config(
+            text=f"{volt:.2f}V" if volt is not None else "--")
+        self._home_labels["uptime"].config(text=_fmt_uptime(up))
+
+    def _spin_start(self):
+        self._spin_running = True
+        self._spin_tick()
+
+    def _spin_stop(self):
+        self._spin_running = False
+        self._home_spin.config(text="✗", fg=RED)
+
+    def _spin_tick(self):
+        if not self._spin_running:
+            return
+        self._home_spin.config(
+            text=self._SPIN_FRAMES[self._spin_idx % len(self._SPIN_FRAMES)],
+            fg=GREEN)
+        self._spin_idx += 1
+        self.after(220, self._spin_tick)
+
+    def _send_message(self):
+        text = self._send_text_var.get().strip()
+        if not text:
+            return
+        ch = int(self._send_ch_var.get() or 0)
+        self._send_status.config(text="Sending...", fg=YELLOW)
+        def post():
+            result = _api_post("/mesh/send_text", {"text": text, "channel": ch})
+            ok = result.get("ok", False) if result else False
+            def update():
+                if ok:
+                    self._send_text_var.set("")
+                    self._send_status.config(text=f"✓ Sent on Ch{ch}", fg=GREEN)
+                else:
+                    err = result.get("error","failed") if result else "no response"
+                    self._send_status.config(text=f"✗ {err}", fg=RED)
+                self.after(3000, lambda: self._send_status.config(text="", fg=SUBTEXT))
+            self.after(0, update)
+        threading.Thread(target=post, daemon=True).start()
 
     # ── Telemetry tab ─────────────────────────────────────────────────────────
 
@@ -662,6 +838,7 @@ class App(tk.Tk):
             info = _api_get("/mesh/info")
             cfg  = _api_get("/mesh/config")
             self.after(0, lambda: self._mesh_cfg_populate(info, cfg))
+            self.after(0, lambda: self._update_home_device(info))
         threading.Thread(target=fetch, daemon=True).start()
 
     def _mesh_cfg_populate(self, info, cfg):
@@ -1061,6 +1238,13 @@ class App(tk.Tk):
         if telemetry is not None: self._update_telemetry(telemetry)
         if journal   is not None: self._journal_update(journal.get("lines", []))
         self._update_ots_tab(status, cfg, stats)
+        self._update_home_panels(status, cfg, stats)
+
+        # Auto-populate Node Config and home device panel on connect
+        serial_now = status.get("serial_connected", False) if status else False
+        if serial_now and not self._prev_serial_connected:
+            self.after(600, self._mesh_cfg_refresh)
+        self._prev_serial_connected = serial_now
 
     def _update_status_bar(self, status):
         if not status:
