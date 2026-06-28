@@ -271,7 +271,7 @@ def sysinfo():
     # Internet (quick socket probe, 0.5s timeout)
     try:
         import socket as _sock
-        conn = _sock.create_connection(("8.8.8.8", 53), timeout=0.5)
+        conn = _sock.create_connection(("8.8.8.8", 53), timeout=2)
         conn.close()
         result["internet"] = True
     except Exception:

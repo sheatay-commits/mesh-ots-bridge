@@ -125,87 +125,109 @@ class SerialIface:
         with self._lock:
             if not self._iface or not self._connected:
                 return None
+
             try:
                 cfg = self._iface.localNode.localConfig
-                lora = cfg.lora
-                dev  = cfg.device
-                pos  = cfg.position
-                pwr  = cfg.power
-                bt   = cfg.bluetooth
-                disp = cfg.display
+            except Exception as e:
+                logger.error("localConfig unavailable: %s", e)
+                return None
 
-                def _enum_name(pb_enum, val):
-                    try:
-                        return pb_enum.Name(val)
-                    except Exception:
-                        return str(val)
-
+            # Resolve protobuf enum helpers — fail silently, fall back to ints
+            try:
+                from meshtastic.protobuf import config_pb2 as _cpb
+            except ImportError:
                 try:
-                    from meshtastic.protobuf import config_pb2 as _cpb
+                    from meshtastic import config_pb2 as _cpb
                 except ImportError:
-                    try:
-                        from meshtastic import config_pb2 as _cpb
-                    except ImportError:
-                        _cpb = None
+                    _cpb = None
 
-                def _rn(v):
-                    return _enum_name(_cpb.Config.LoRaConfig.RegionCode,  v) if _cpb else str(v)
-                def _mn(v):
-                    return _enum_name(_cpb.Config.LoRaConfig.ModemPreset, v) if _cpb else str(v)
-                def _dn(v):
-                    return _enum_name(_cpb.Config.DeviceConfig.Role,      v) if _cpb else str(v)
-                def _bn(v):
-                    return _enum_name(_cpb.Config.BluetoothConfig.PairingMode, v) if _cpb else str(v)
+            def _name(enum, val):
+                try:
+                    return enum.Name(val) if _cpb else str(val)
+                except Exception:
+                    return str(val)
 
-                return {
-                    "lora": {
-                        "region":       lora.region, "region_name": _rn(lora.region),
-                        "modem_preset": lora.modem_preset, "modem_preset_name": _mn(lora.modem_preset),
-                        "hop_limit":    lora.hop_limit,
-                        "tx_power":     lora.tx_power,
-                        "use_preset":   lora.use_preset,
-                        "bandwidth":    lora.bandwidth,
-                        "spread_factor":lora.spread_factor,
-                        "coding_rate":  lora.coding_rate,
-                    },
-                    "device": {
-                        "role": dev.role, "role_name": _dn(dev.role),
-                        "serial_enabled":    dev.serial_enabled,
-                        "debug_log_enabled": dev.debug_log_enabled,
-                        "rebroadcast_mode":  dev.rebroadcast_mode,
-                    },
-                    "position": {
-                        "gps_enabled":                pos.gps_enabled,
-                        "gps_update_interval":        pos.gps_update_interval,
-                        "position_broadcast_secs":    pos.position_broadcast_secs,
-                        "smart_position_enabled":     pos.smart_position_enabled,
-                        "broadcast_smart_minimum_interval_secs":
-                            pos.position_broadcast_smart_minimum_interval_secs,
-                        "broadcast_smart_minimum_distance":
-                            pos.position_broadcast_smart_minimum_distance,
-                    },
-                    "power": {
-                        "is_power_saving":              pwr.is_power_saving,
-                        "on_battery_shutdown_after_secs": pwr.on_battery_shutdown_after_secs,
-                        "wait_bluetooth_secs":          pwr.wait_bluetooth_secs,
-                        "ls_secs":                      pwr.ls_secs,
-                        "min_wake_secs":                pwr.min_wake_secs,
-                    },
-                    "bluetooth": {
-                        "enabled":   bt.enabled,
-                        "mode":      bt.mode, "mode_name": _bn(bt.mode),
-                        "fixed_pin": bt.fixed_pin,
-                    },
-                    "display": {
-                        "screen_on_secs":              disp.screen_on_secs,
-                        "auto_screen_carousel_secs":   disp.auto_screen_carousel_secs,
-                        "flip_screen":                 disp.flip_screen,
-                        "units":                       disp.units,
-                    },
+            result = {}
+
+            try:
+                lora = cfg.lora
+                result["lora"] = {
+                    "region":            lora.region,
+                    "region_name":       _name(_cpb.Config.LoRaConfig.RegionCode,  lora.region) if _cpb else str(lora.region),
+                    "modem_preset":      lora.modem_preset,
+                    "modem_preset_name": _name(_cpb.Config.LoRaConfig.ModemPreset, lora.modem_preset) if _cpb else str(lora.modem_preset),
+                    "hop_limit":         lora.hop_limit,
+                    "tx_power":          lora.tx_power,
+                    "use_preset":        lora.use_preset,
+                    "bandwidth":         lora.bandwidth,
+                    "spread_factor":     lora.spread_factor,
+                    "coding_rate":       lora.coding_rate,
                 }
             except Exception as e:
-                logger.error("get_local_config failed: %s", e, exc_info=True)
-                return None
+                logger.warning("lora config read failed: %s", e)
+
+            try:
+                dev = cfg.device
+                result["device"] = {
+                    "role":              dev.role,
+                    "role_name":         _name(_cpb.Config.DeviceConfig.Role, dev.role) if _cpb else str(dev.role),
+                    "serial_enabled":    dev.serial_enabled,
+                    "debug_log_enabled": dev.debug_log_enabled,
+                    "rebroadcast_mode":  dev.rebroadcast_mode,
+                }
+            except Exception as e:
+                logger.warning("device config read failed: %s", e)
+
+            try:
+                pos = cfg.position
+                result["position"] = {
+                    "gps_enabled":              pos.gps_enabled,
+                    "gps_update_interval":      pos.gps_update_interval,
+                    "position_broadcast_secs":  pos.position_broadcast_secs,
+                    "smart_position_enabled":   pos.smart_position_enabled,
+                    "broadcast_smart_minimum_interval_secs":
+                        pos.position_broadcast_smart_minimum_interval_secs,
+                    "broadcast_smart_minimum_distance":
+                        pos.position_broadcast_smart_minimum_distance,
+                }
+            except Exception as e:
+                logger.warning("position config read failed: %s", e)
+
+            try:
+                pwr = cfg.power
+                result["power"] = {
+                    "is_power_saving":               pwr.is_power_saving,
+                    "on_battery_shutdown_after_secs": pwr.on_battery_shutdown_after_secs,
+                    "wait_bluetooth_secs":           pwr.wait_bluetooth_secs,
+                    "ls_secs":                       pwr.ls_secs,
+                    "min_wake_secs":                 pwr.min_wake_secs,
+                }
+            except Exception as e:
+                logger.warning("power config read failed: %s", e)
+
+            try:
+                bt = cfg.bluetooth
+                result["bluetooth"] = {
+                    "enabled":   bt.enabled,
+                    "mode":      bt.mode,
+                    "mode_name": _name(_cpb.Config.BluetoothConfig.PairingMode, bt.mode) if _cpb else str(bt.mode),
+                    "fixed_pin": bt.fixed_pin,
+                }
+            except Exception as e:
+                logger.warning("bluetooth config read failed: %s", e)
+
+            try:
+                disp = cfg.display
+                result["display"] = {
+                    "screen_on_secs":            disp.screen_on_secs,
+                    "auto_screen_carousel_secs": disp.auto_screen_carousel_secs,
+                    "flip_screen":               disp.flip_screen,
+                    "units":                     disp.units,
+                }
+            except Exception as e:
+                logger.warning("display config read failed: %s", e)
+
+            return result if result else None
 
     def set_local_config(self, section, updates):
         """Write a subset of fields in one localConfig section and push to device."""
