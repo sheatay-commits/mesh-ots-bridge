@@ -1,9 +1,12 @@
 """CoT XML builder and parser for the Meshtastic ↔ OTS bridge."""
 
 import hashlib
+import logging
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
+
+logger = logging.getLogger(__name__)
 
 # Marker text format used on the mesh layer (no native marker packet type)
 _MRK_RE = re.compile(
@@ -194,6 +197,8 @@ def atak_plugin_to_cot(packet, decoded):
     payload = decoded.get("payload", b"")
     if not payload:
         return None, f"ATAK (empty) from {node_id}"
+
+    logger.info("ATAK_PLUGIN raw hex from %s: %s", node_id, payload.hex())
 
     # Detect is_compressed from raw bytes: TAKPacket field 1 (varint) = 1
     # encodes as 0x08 0x01 at the start of the payload.
