@@ -223,13 +223,11 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
     logger.debug("ATAK Forwarder frag offset=%d (%d/%d) from %s",
                  offset, len(_buf[key]), total_frags, node_id)
 
-    if len(_buf[key]) < total_frags:
-        return None, f"ATAK Forwarder frag {len(_buf[key])}/{total_frags} from {node_id}"
-
-    # All fragments received — write each fragment's data at its byte offset.
-    # Fragments may overlap (TAK Forwarder redundancy scheme): overlapping
-    # regions carry identical bytes so overwriting is safe.
-    fragments = _buf.pop(key)
+    # Attempt decompression with however many unique fragments we have so far.
+    # TAK Forwarder sends redundant retransmits; if 2 fragments cover the full
+    # stream we succeed early without waiting for the 3rd.
+    fragments = _buf[key]
+    n = len(fragments)
     buf_size = max(off + len(d) for off, d in fragments.items())
     buf = bytearray(buf_size)
     for off, d in fragments.items():
@@ -237,10 +235,17 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
     stream = bytes(buf)
     try:
         xml = zlib.decompress(stream).decode("utf-8")
-        logger.info("ATAK Forwarder CoT from %s: %s", node_id, xml[:120])
+        logger.info("ATAK Forwarder CoT from %s (%d/%d frags): %s",
+                    node_id, n, total_frags, xml[:120])
+        _buf.pop(key, None)
         return xml, f"ATAK Forwarder CoT from {node_id}"
-    except Exception as e:
-        logger.warning("ATAK Forwarder decompress failed from %s: %s", node_id, e)
+    except Exception:
+        if n < total_frags:
+            return None, f"ATAK Forwarder frag {n}/{total_frags} from {node_id}"
+        # Have all fragments but still failing — log full hex for diagnosis
+        logger.warning("ATAK Forwarder decompress failed (%d frags, %d bytes) from %s: stream=%s",
+                       n, len(stream), node_id, stream.hex())
+        _buf.pop(key, None)
         return None, f"ATAK Forwarder (decompress error) from {node_id}"
 
 
