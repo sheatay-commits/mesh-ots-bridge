@@ -213,8 +213,8 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
     offset      = payload[11]
     data        = payload[12:]
 
-    logger.info("ATAK Forwarder raw: msgid=%s fragid=%s total=%d offset=0x%02x datalen=%d",
-                msg_id.hex(), payload[6:8].hex(), total_frags, offset, len(data))
+    logger.info("ATAK Forwarder raw: msgid=%s fragid=%s total=%d offset=0x%02x data_start=%s",
+                msg_id.hex(), payload[6:8].hex(), total_frags, offset, data[:16].hex())
 
     key = msg_id.hex()
     if key not in _buf:
@@ -226,16 +226,23 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
     if len(_buf[key]) < total_frags:
         return None, f"ATAK Forwarder frag {len(_buf[key])}/{total_frags} from {node_id}"
 
-    # All fragments received — reassemble in offset order
+    # All fragments received — try all orderings and inner-header strip sizes
     fragments = _buf.pop(key)
-    stream = b"".join(data for _, data in sorted(fragments.items()))
-    try:
-        xml = zlib.decompress(stream).decode("utf-8")
-        logger.info("ATAK Forwarder CoT from %s: %s", node_id, xml[:120])
-        return xml, f"ATAK Forwarder CoT from {node_id}"
-    except Exception as e:
-        logger.warning("ATAK Forwarder decompress failed from %s: %s", node_id, e)
-        return None, f"ATAK Forwarder (decompress error) from {node_id}"
+    import itertools
+    frag_list = sorted(fragments.items())  # sort by offset byte
+    for perm in itertools.permutations(frag_list):
+        for strip in range(0, 8):  # try stripping 0-7 bytes from each fragment
+            try:
+                stream = b"".join(d[strip:] for _, d in perm)
+                xml = zlib.decompress(stream).decode("utf-8")
+                offsets = [o for o, _ in perm]
+                logger.info("ATAK Forwarder OK: order=%s strip=%d xml=%s",
+                            offsets, strip, xml[:120])
+                return xml, f"ATAK Forwarder CoT from {node_id}"
+            except Exception:
+                pass
+    logger.warning("ATAK Forwarder: all reassembly attempts failed from %s", node_id)
+    return None, f"ATAK Forwarder (decompress error) from {node_id}"
 
 
 def atak_plugin_to_cot(packet, decoded):
