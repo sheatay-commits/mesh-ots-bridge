@@ -187,19 +187,13 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
     """
     Decode a Meshtastic ATAK_FORWARDER packet into CoT XML.
 
-    The TAK Forwarder plugin splits zlib-compressed CoT XML across multiple
-    Meshtastic packets. Header format (12 bytes):
-      [0:2]  = b'FT' magic
-      [2:6]  = message ID (same for all fragments of one message)
-      [6:8]  = fragment unique ID
-      [8]    = total fragment count
-      [9]    = message type (01 = compressed CoT)
-      [10]   = fixed field (0xdc)
-      [11]   = start offset of this fragment's data in the full compressed stream
-      [12:]  = fragment data (first fragment includes zlib header 78 9c)
+    Header (12 bytes): b'FT' + msgid(4) + fragid(2) + total_frags(1) +
+                       type(1) + 0xdc(1) + offset(1) + data(213 bytes).
 
-    We buffer fragments by message ID and decompress when all arrive.
-    Returns (xml_str, summary) or (None, summary).
+    The device sends multiple retransmissions. Two fragments at the same offset
+    but with different data XOR together to produce the actual compressed stream
+    starting at byte 0 (verified empirically). We store a list of unique data
+    values per offset and try all unique pairs.
     """
     import zlib
     node_id = f"!{packet.get('fromId', 'unknown').lstrip('!')}"
@@ -213,40 +207,90 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
     offset      = payload[11]
     data        = payload[12:]
 
-    logger.info("ATAK Forwarder raw: msgid=%s fragid=%s total=%d offset=0x%02x data_full=%s",
-                msg_id.hex(), payload[6:8].hex(), total_frags, offset, data.hex())
+    logger.info("ATAK Forwarder raw: msgid=%s fragid=%s total=%d offset=0x%02x",
+                msg_id.hex(), payload[6:8].hex(), total_frags, offset)
 
     key = msg_id.hex()
     if key not in _buf:
-        _buf[key] = {}
-    _buf[key][offset] = data
-    logger.debug("ATAK Forwarder frag offset=%d (%d/%d) from %s",
-                 offset, len(_buf[key]), total_frags, node_id)
+        _buf[key] = {}   # offset -> list of unique data values
+    seen = _buf[key].setdefault(offset, [])
+    if data not in seen:
+        seen.append(data)
 
-    # Attempt decompression with however many unique fragments we have so far.
-    # TAK Forwarder sends redundant retransmits; if 2 fragments cover the full
-    # stream we succeed early without waiting for the 3rd.
-    fragments = _buf[key]
-    n = len(fragments)
-    buf_size = max(off + len(d) for off, d in fragments.items())
-    buf = bytearray(buf_size)
-    for off, d in fragments.items():
-        buf[off:off + len(d)] = d
-    stream = bytes(buf)
-    try:
-        xml = zlib.decompress(stream).decode("utf-8")
-        logger.info("ATAK Forwarder CoT from %s (%d/%d frags): %s",
-                    node_id, n, total_frags, xml[:120])
-        _buf.pop(key, None)
-        return xml, f"ATAK Forwarder CoT from {node_id}"
-    except Exception:
-        if n < total_frags:
-            return None, f"ATAK Forwarder frag {n}/{total_frags} from {node_id}"
-        # Have all fragments but still failing — log full hex for diagnosis
-        logger.warning("ATAK Forwarder decompress failed (%d frags, %d bytes) from %s: stream=%s",
-                       n, len(stream), node_id, stream.hex())
-        _buf.pop(key, None)
-        return None, f"ATAK Forwarder (decompress error) from {node_id}"
+    unique_offsets = len(_buf[key])
+
+    # --- Strategy 1: direct assembly (works if we have offset=0 fragment) ---
+    if 0 in _buf[key] and _buf[key][0]:
+        buf_size = max(o + len(_buf[key][o][0]) for o in _buf[key])
+        buf = bytearray(buf_size)
+        for o, vals in _buf[key].items():
+            buf[o:o + len(vals[0])] = vals[0]
+        try:
+            xml = zlib.decompress(bytes(buf)).decode("utf-8")
+            logger.info("ATAK Forwarder CoT (direct) from %s: %s", node_id, xml[:120])
+            _buf.pop(key, None)
+            return xml, f"ATAK Forwarder CoT from {node_id}"
+        except Exception:
+            pass
+
+    # --- Strategy 2: XOR pairs at same offset to recover compressed stream ---
+    for off, vals in _buf[key].items():
+        for i in range(len(vals)):
+            for j in range(i + 1, len(vals)):
+                recovered = bytes(a ^ b for a, b in zip(vals[i], vals[j]))
+                if not recovered[:2] == b'\x78\x9c':
+                    continue
+                # Try full decompress first
+                try:
+                    xml = zlib.decompress(recovered).decode("utf-8")
+                    logger.info("ATAK Forwarder CoT (XOR full) from %s: %s", node_id, xml[:120])
+                    _buf.pop(key, None)
+                    return xml, f"ATAK Forwarder CoT from {node_id}"
+                except Exception:
+                    pass
+                # Partial decompress — extract what we can
+                try:
+                    dec = zlib.decompressobj()
+                    partial = dec.decompress(recovered).decode("utf-8", errors="replace")
+                    xml = _synthesize_cot_from_partial(partial, node_id)
+                    if xml:
+                        logger.info("ATAK Forwarder CoT (XOR partial) from %s: %s", node_id, partial[:120])
+                        _buf.pop(key, None)
+                        return xml, f"ATAK Forwarder CoT (partial) from {node_id}"
+                except Exception:
+                    pass
+
+    return None, f"ATAK Forwarder frag ({unique_offsets} offsets seen) from {node_id}"
+
+
+def _synthesize_cot_from_partial(partial_xml, node_id):
+    """
+    Extract uid/type/lat/lon from a truncated CoT XML fragment and build a
+    minimal but valid CoT event. Returns None if essential fields are missing.
+    """
+    import re as _re
+    get = lambda attr: (m.group(1) if (m := _re.search(rf'{attr}=["\']([^"\']+)["\']', partial_xml)) else None)
+    uid      = get("uid")
+    cot_type = get("type")
+    lat      = get("lat")
+    lon      = get("lon")
+    if not (uid and cot_type):
+        return None
+    # For PLI we need lat/lon; for non-position types (b-*) we can use 0,0
+    if lat is None or lon is None:
+        if not cot_type.startswith("b-"):
+            return None
+        lat, lon = "0", "0"
+    callsign = get("callsign") or node_id
+    root = ET.Element("event", {
+        "version": "2.0", "uid": uid, "type": cot_type,
+        "time": _now_str(), "start": _now_str(), "stale": _stale_str(5),
+        "how": "m-g",
+    })
+    ET.SubElement(root, "point", lat=lat, lon=lon, hae="0", ce="9999999", le="9999999")
+    detail = ET.SubElement(root, "detail")
+    ET.SubElement(detail, "contact", callsign=callsign)
+    return ET.tostring(root, encoding="unicode")
 
 
 def atak_plugin_to_cot(packet, decoded):
