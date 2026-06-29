@@ -250,8 +250,6 @@ def atak_plugin_to_cot(packet, decoded):
     if not payload:
         return None, f"ATAK (empty) from {node_id}"
 
-    logger.info("ATAK_PLUGIN raw hex from %s: %s", node_id, payload.hex())
-
     # Detect is_compressed from raw bytes: TAKPacket field 1 (varint) = 1
     # encodes as 0x08 0x01 at the start of the payload.
     is_compressed = len(payload) >= 2 and payload[0] == 0x08 and payload[1] == 0x01
