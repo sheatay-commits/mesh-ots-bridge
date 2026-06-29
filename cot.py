@@ -183,6 +183,58 @@ def cot_to_marker_text(cot_dict, gateway_callsign="OTS"):
     return f"[MRK] !{callsign} {lat:.6f},{lon:.6f} {name}"
 
 
+def atak_forwarder_to_cot(packet, decoded, _buf={}):
+    """
+    Decode a Meshtastic ATAK_FORWARDER packet into CoT XML.
+
+    The TAK Forwarder plugin splits zlib-compressed CoT XML across multiple
+    Meshtastic packets. Header format (12 bytes):
+      [0:2]  = b'FT' magic
+      [2:6]  = message ID (same for all fragments of one message)
+      [6:8]  = fragment unique ID
+      [8]    = total fragment count
+      [9]    = message type (01 = compressed CoT)
+      [10]   = fixed field (0xdc)
+      [11]   = start offset of this fragment's data in the full compressed stream
+      [12:]  = fragment data (first fragment includes zlib header 78 9c)
+
+    We buffer fragments by message ID and decompress when all arrive.
+    Returns (xml_str, summary) or (None, summary).
+    """
+    import zlib
+    node_id = f"!{packet.get('fromId', 'unknown').lstrip('!')}"
+    payload = decoded.get("payload", b"")
+
+    if len(payload) < 13 or payload[:2] != b'FT':
+        return None, f"ATAK Forwarder (invalid) from {node_id}"
+
+    msg_id      = payload[2:6]
+    total_frags = payload[8]
+    offset      = payload[11]
+    data        = payload[12:]
+
+    key = msg_id.hex()
+    if key not in _buf:
+        _buf[key] = {}
+    _buf[key][offset] = data
+    logger.debug("ATAK Forwarder frag offset=%d (%d/%d) from %s",
+                 offset, len(_buf[key]), total_frags, node_id)
+
+    if len(_buf[key]) < total_frags:
+        return None, f"ATAK Forwarder frag {len(_buf[key])}/{total_frags} from {node_id}"
+
+    # All fragments received — reassemble in offset order
+    fragments = _buf.pop(key)
+    stream = b"".join(data for _, data in sorted(fragments.items()))
+    try:
+        xml = zlib.decompress(stream).decode("utf-8")
+        logger.info("ATAK Forwarder CoT from %s: %s", node_id, xml[:120])
+        return xml, f"ATAK Forwarder CoT from {node_id}"
+    except Exception as e:
+        logger.warning("ATAK Forwarder decompress failed from %s: %s", node_id, e)
+        return None, f"ATAK Forwarder (decompress error) from {node_id}"
+
+
 def atak_plugin_to_cot(packet, decoded):
     """
     Decode a Meshtastic ATAK_PLUGIN packet into CoT XML.

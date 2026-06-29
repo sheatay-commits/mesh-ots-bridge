@@ -72,14 +72,13 @@ def on_mesh_receive(packet):
     elif portnum == "ATAK_PLUGIN":
         xml, summary = cot.atak_plugin_to_cot(packet, decoded)
 
+    elif portnum == "ATAK_FORWARDER":
+        xml, summary = cot.atak_forwarder_to_cot(packet, decoded)
+
     elif portnum and filters.get("other", True):
         # Catch-all: routing pings, range tests, admin, etc. — still shows "last heard"
         label = portnum.replace("_APP", "").replace("_", " ").title()
         summary = f"{label} from {callsign}"
-        raw = decoded.get("payload", b"")
-        if raw:
-            logger.info("UNKNOWN portnum=%s hex from %s: %s", portnum, node_id,
-                        raw.hex() if isinstance(raw, (bytes, bytearray)) else str(raw))
 
     if summary:
         api.log_traffic("mesh→ots", summary, channel=ch_name, portnum=portnum,
