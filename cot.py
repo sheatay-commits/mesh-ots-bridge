@@ -244,21 +244,35 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
             break
 
     if compressed_start:
-        # Build the full compressed stream:
-        # compressed[0:213] = compressed_start
-        # compressed[off:off+213] = vals[0] for offsets with exactly 1 data value
-        buf_size = 213
-        single_offset_frags = {o: v[0] for o, v in _buf[key].items() if len(v) == 1}
-        if single_offset_frags:
-            buf_size = max(buf_size, max(o + len(d) for o, d in single_offset_frags.items()))
+        # Identify systematic (direct) fragment for each offset:
+        # - Offsets with 1 unique value: always systematic
+        # - Offsets with 2 unique values: the one whose overlap with compressed_start
+        #   is consistent is systematic; the other is parity
+        systematic = {}  # offset -> bytes (= compressed[offset:offset+213])
+        for o, vals in _buf[key].items():
+            if len(vals) == 1:
+                systematic[o] = vals[0]
+            else:
+                # For overlapping region with compressed_start: check consistency
+                overlap_len = max(0, len(compressed_start) - o)
+                for v in vals:
+                    if overlap_len > 0:
+                        if bytes(v[:overlap_len]) == bytes(compressed_start[o:o + overlap_len]):
+                            systematic[o] = v
+                            break
+                    else:
+                        # No overlap to check — try both; pick first for now
+                        systematic.setdefault(o, vals[0])
+
+        buf_size = max((o + len(d)) for o, d in systematic.items()) if systematic else 213
+        buf_size = max(buf_size, len(compressed_start))
         buf = bytearray(buf_size)
-        # Write direct fragments first (lower priority at overlaps)
-        for o, d in sorted(single_offset_frags.items(), reverse=True):
+        for o, d in sorted(systematic.items(), reverse=True):
             buf[o:o + len(d)] = d
-        # compressed_start covers [0:213] — write last to win at overlaps
         buf[0:len(compressed_start)] = compressed_start
         stream = bytes(buf)
-        logger.info("ATAK Forwarder assembled: %d bytes, start=%s", len(stream), stream[:8].hex())
+        logger.info("ATAK Forwarder assembled: %d bytes, start=%s offsets=%s",
+                    len(stream), stream[:8].hex(), sorted(systematic.keys()))
         try:
             xml = zlib.decompress(stream).decode("utf-8")
             logger.info("ATAK Forwarder CoT from %s: %s", node_id, xml[:200])
@@ -266,7 +280,6 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
             return xml, f"ATAK Forwarder CoT from {node_id}"
         except Exception as e:
             logger.warning("ATAK Forwarder decompress failed (%d bytes): %s", len(stream), e)
-            # Fall through to partial extraction
         try:
             dec = zlib.decompressobj()
             partial = dec.decompress(stream).decode("utf-8", errors="replace")
