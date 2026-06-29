@@ -226,23 +226,22 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
     if len(_buf[key]) < total_frags:
         return None, f"ATAK Forwarder frag {len(_buf[key])}/{total_frags} from {node_id}"
 
-    # All fragments received — try all orderings and inner-header strip sizes
+    # All fragments received — write each fragment's data at its byte offset.
+    # Fragments may overlap (TAK Forwarder redundancy scheme): overlapping
+    # regions carry identical bytes so overwriting is safe.
     fragments = _buf.pop(key)
-    import itertools
-    frag_list = sorted(fragments.items())  # sort by offset byte
-    for perm in itertools.permutations(frag_list):
-        for strip in range(0, 8):  # try stripping 0-7 bytes from each fragment
-            try:
-                stream = b"".join(d[strip:] for _, d in perm)
-                xml = zlib.decompress(stream).decode("utf-8")
-                offsets = [o for o, _ in perm]
-                logger.info("ATAK Forwarder OK: order=%s strip=%d xml=%s",
-                            offsets, strip, xml[:120])
-                return xml, f"ATAK Forwarder CoT from {node_id}"
-            except Exception:
-                pass
-    logger.warning("ATAK Forwarder: all reassembly attempts failed from %s", node_id)
-    return None, f"ATAK Forwarder (decompress error) from {node_id}"
+    buf_size = max(off + len(d) for off, d in fragments.items())
+    buf = bytearray(buf_size)
+    for off, d in fragments.items():
+        buf[off:off + len(d)] = d
+    stream = bytes(buf)
+    try:
+        xml = zlib.decompress(stream).decode("utf-8")
+        logger.info("ATAK Forwarder CoT from %s: %s", node_id, xml[:120])
+        return xml, f"ATAK Forwarder CoT from {node_id}"
+    except Exception as e:
+        logger.warning("ATAK Forwarder decompress failed from %s: %s", node_id, e)
+        return None, f"ATAK Forwarder (decompress error) from {node_id}"
 
 
 def atak_plugin_to_cot(packet, decoded):
