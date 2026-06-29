@@ -180,92 +180,161 @@ def cot_to_marker_text(cot_dict, gateway_callsign="OTS"):
 
 def atak_plugin_to_cot(packet, decoded):
     """
-    Decode a Meshtastic ATAK_PLUGIN packet (TAKPacket protobuf) into CoT XML.
+    Decode a Meshtastic ATAK_PLUGIN packet into CoT XML.
+    Older meshtastic-python versions leave the TAKPacket as raw bytes in
+    decoded["payload"] rather than parsing it — we handle both cases.
     Returns (xml_str, summary) or (None, summary) if not forwardable.
     """
     node_id = f"!{packet.get('fromId', 'unknown').lstrip('!')}"
 
-    # The meshtastic library decodes TAKPacket into decoded["atak"]
-    tak = decoded.get("atak", {})
-    if not tak:
-        return None, f"ATAK (raw) from {node_id}"
+    payload = decoded.get("payload", b"")
+    if not payload:
+        return None, f"ATAK (empty) from {node_id}"
 
-    contact = tak.get("contact", {})
-    callsign = contact.get("callsign") or contact.get("deviceCallsign") or node_id
-
-    # --- PLI (position) ---
-    pli = tak.get("pli")
-    if pli:
-        lat = pli.get("latI", 0) / 1e7
-        lon = pli.get("lonI", 0) / 1e7
-        alt = pli.get("altitude", 0)
-        root = ET.Element("event", {
-            "version": "2.0",
-            "uid": _stable_uid("atak-pli", node_id),
-            "type": "a-f-G-U-C",
-            "time": _now_str(),
-            "start": _now_str(),
-            "stale": _stale_str(5),
-            "how": "m-g",
-        })
-        ET.SubElement(root, "point", lat=str(lat), lon=str(lon),
-                      hae=str(alt), ce="9999999", le="9999999")
-        detail = ET.SubElement(root, "detail")
-        ET.SubElement(detail, "contact", callsign=callsign)
-        return ET.tostring(root, encoding="unicode"), f"ATAK PLI from {callsign}"
-
-    # --- Chat ---
-    chat = tak.get("chat")
-    if chat:
-        msg = chat.get("message", "")
-        root = ET.Element("event", {
-            "version": "2.0",
-            "uid": _stable_uid("atak-chat", node_id, msg[:20]),
-            "type": "b-t-f",
-            "time": _now_str(),
-            "start": _now_str(),
-            "stale": _stale_str(5),
-            "how": "h-g-i-g-o",
-        })
-        ET.SubElement(root, "point", lat="0", lon="0", hae="0", ce="9999999", le="9999999")
-        d = ET.SubElement(root, "detail")
-        remarks = ET.SubElement(d, "remarks", source=callsign, time=_now_str())
-        remarks.text = msg
-        ET.SubElement(d, "contact", callsign=callsign)
-        return ET.tostring(root, encoding="unicode"), f'ATAK chat "{msg[:40]}" from {callsign}'
-
-    # --- Detail XML (markers, shapes, etc.) ---
-    detail_xml = tak.get("detail")
-    if detail_xml:
-        # detail is a raw XML fragment — wrap it in a full CoT event
+    # Try protobuf decode first (newer meshtastic-python does this automatically).
+    # Fall back to raw byte parsing if the import or parse fails.
+    tak_proto = None
+    try:
         try:
-            detail_el = ET.fromstring(f"<detail>{detail_xml}</detail>")
-            # Try to find a contact callsign inside the detail
-            inner_contact = detail_el.find(".//contact")
-            if inner_contact is not None:
-                callsign = inner_contact.get("callsign", callsign)
-            # Look for a point element
-            point_el = detail_el.find(".//point")
-            lat = point_el.get("lat", "0") if point_el is not None else "0"
-            lon = point_el.get("lon", "0") if point_el is not None else "0"
-            hae = point_el.get("hae", "0") if point_el is not None else "0"
+            from meshtastic.protobuf import atak_pb2
+        except ImportError:
+            from meshtastic import atak_pb2
+        tak_proto = atak_pb2.TAKPacket()
+        tak_proto.ParseFromString(payload if isinstance(payload, bytes) else bytes(payload))
+    except Exception:
+        tak_proto = None
+
+    # When is_compressed=True the Meshtastic firmware packs lat/lon as fixed32
+    # integers in TAKPacket field 5 rather than the standard sint32 PLI in field 3.
+    # Parse field 5 directly from the raw bytes.
+    if tak_proto is not None and tak_proto.is_compressed:
+        lat, lon, alt = _parse_compressed_pli(payload)
+        callsign = node_id  # compressed callsign is binary-packed, use node id
+        if lat is not None:
             root = ET.Element("event", {
                 "version": "2.0",
-                "uid": _stable_uid("atak-detail", node_id, detail_xml[:30]),
-                "type": "b-m-p-s-m",
+                "uid": _stable_uid("atak-pli", node_id),
+                "type": "a-f-G-U-C",
                 "time": _now_str(),
                 "start": _now_str(),
-                "stale": _stale_str(525600),
+                "stale": _stale_str(5),
+                "how": "m-g",
+            })
+            ET.SubElement(root, "point", lat=str(lat), lon=str(lon),
+                          hae=str(alt or 0), ce="9999999", le="9999999")
+            detail = ET.SubElement(root, "detail")
+            ET.SubElement(detail, "contact", callsign=callsign)
+            return ET.tostring(root, encoding="unicode"), f"ATAK PLI from {callsign} ({lat:.4f},{lon:.4f})"
+        return None, f"ATAK compressed (no position) from {node_id}"
+
+    # Uncompressed: use proto fields normally
+    if tak_proto is not None:
+        callsign = tak_proto.contact.callsign or tak_proto.contact.device_callsign or node_id
+        variant = tak_proto.WhichOneof("payload_variant")
+
+        if variant == "pli":
+            lat = tak_proto.pli.latitude_i / 1e7
+            lon = tak_proto.pli.longitude_i / 1e7
+            alt = tak_proto.pli.altitude
+            if lat == 0.0 and lon == 0.0:
+                return None, f"ATAK PLI (no GPS) from {callsign}"
+            root = ET.Element("event", {
+                "version": "2.0",
+                "uid": _stable_uid("atak-pli", node_id),
+                "type": "a-f-G-U-C",
+                "time": _now_str(),
+                "start": _now_str(),
+                "stale": _stale_str(5),
+                "how": "m-g",
+            })
+            ET.SubElement(root, "point", lat=str(lat), lon=str(lon),
+                          hae=str(alt), ce="9999999", le="9999999")
+            detail = ET.SubElement(root, "detail")
+            ET.SubElement(detail, "contact", callsign=callsign)
+            return ET.tostring(root, encoding="unicode"), f"ATAK PLI from {callsign}"
+
+        if variant == "chat":
+            msg = tak_proto.chat.message
+            root = ET.Element("event", {
+                "version": "2.0",
+                "uid": _stable_uid("atak-chat", node_id, msg[:20]),
+                "type": "b-t-f",
+                "time": _now_str(),
+                "start": _now_str(),
+                "stale": _stale_str(5),
                 "how": "h-g-i-g-o",
             })
-            ET.SubElement(root, "point", lat=lat, lon=lon, hae=hae, ce="9999999", le="9999999")
-            root.append(detail_el)
-            ET.SubElement(detail_el, "archive")
-            return ET.tostring(root, encoding="unicode"), f"ATAK marker from {callsign}"
-        except ET.ParseError:
-            pass
+            ET.SubElement(root, "point", lat="0", lon="0", hae="0", ce="9999999", le="9999999")
+            d = ET.SubElement(root, "detail")
+            remarks = ET.SubElement(d, "remarks", source=callsign, time=_now_str())
+            remarks.text = msg
+            ET.SubElement(d, "contact", callsign=callsign)
+            return ET.tostring(root, encoding="unicode"), f'ATAK chat "{msg[:40]}" from {callsign}'
 
-    return None, f"ATAK (unhandled) from {callsign}"
+        return None, f"ATAK (no PLI/chat) from {callsign}"
+
+    return None, f"ATAK (proto unavailable) from {node_id}"
+
+
+def _parse_compressed_pli(payload):
+    """
+    Extract lat/lon/alt from a compressed TAKPacket payload.
+    When is_compressed=True the firmware stores PLI in TAKPacket field 5
+    with lat/lon as fixed32 signed integers (/ 1e7 gives degrees).
+    Returns (lat, lon, alt) or (None, None, None).
+    """
+    import struct
+
+    i = 0
+    n = len(payload)
+
+    def read_varint():
+        nonlocal i
+        val = shift = 0
+        while i < n:
+            b = payload[i]; i += 1
+            val |= (b & 0x7f) << shift
+            shift += 7
+            if not (b & 0x80):
+                return val
+        return val
+
+    while i < n:
+        tag_byte = payload[i]; i += 1
+        field_num = tag_byte >> 3
+        wire_type = tag_byte & 0x07
+
+        if wire_type == 0:   # varint — skip
+            read_varint()
+        elif wire_type == 1: # 64-bit — skip
+            i += 8
+        elif wire_type == 2: # length-delimited
+            length = read_varint()
+            sub = payload[i:i + length]; i += length
+            if field_num == 5:  # compressed PLI sub-message
+                lat = lon = alt = None
+                j = 0
+                while j < len(sub):
+                    stag = sub[j]; j += 1
+                    sf = stag >> 3; swt = stag & 7
+                    if swt == 5 and j + 4 <= len(sub):  # fixed32
+                        raw = struct.unpack('<i', sub[j:j + 4])[0]; j += 4
+                        if sf == 1: lat = raw / 1e7
+                        elif sf == 2: lon = raw / 1e7
+                    elif swt == 0:  # varint
+                        val = sh = 0
+                        while j < len(sub):
+                            b = sub[j]; j += 1
+                            val |= (b & 0x7f) << sh; sh += 7
+                            if not (b & 0x80): break
+                        if sf == 3: alt = val
+                    else:
+                        break
+                return lat, lon, alt
+        elif wire_type == 5: # 32-bit — skip
+            i += 4
+
+    return None, None, None
 
 
 def is_allowed(cot_type, allowed_prefixes):

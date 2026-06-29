@@ -70,7 +70,6 @@ def on_mesh_receive(packet):
         summary = f"NodeInfo: {user.get('longName') or user.get('shortName') or node_id}"
 
     elif portnum == "ATAK_PLUGIN":
-        import json; logger.info("ATAK_PLUGIN decoded keys: %s", json.dumps(decoded, default=str))
         xml, summary = cot.atak_plugin_to_cot(packet, decoded)
 
     elif portnum and filters.get("other", True):
@@ -185,7 +184,7 @@ def _resolve_callsign(node_id):
     if _serial:
         for n in _serial.get_nodes():
             user = n.get("user", {})
-            if str(n.get("num")) == node_id.lstrip("!"):
+            if n.get("num") == int(node_id.lstrip("!"), 16):
                 return user.get("longName") or user.get("shortName") or node_id
     return node_id
 
