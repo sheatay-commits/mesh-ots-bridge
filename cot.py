@@ -213,6 +213,9 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
     offset      = payload[11]
     data        = payload[12:]
 
+    logger.info("ATAK Forwarder raw: msgid=%s fragid=%s total=%d offset=0x%02x datalen=%d",
+                msg_id.hex(), payload[6:8].hex(), total_frags, offset, len(data))
+
     key = msg_id.hex()
     if key not in _buf:
         _buf[key] = {}
