@@ -83,6 +83,7 @@ def on_mesh_receive(packet):
         logger.debug("mesh→ots [ch%d] %s", channel_idx, summary)
 
     if xml and _ots:
+        logger.info("CoT→OTS: %s", xml)
         _ots.send_cot(xml)
 
 
