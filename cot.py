@@ -227,13 +227,15 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
         buf = bytearray(buf_size)
         for o, vals in _buf[key].items():
             buf[o:o + len(vals[0])] = vals[0]
+        stream = bytes(buf)
+        logger.info("ATAK Forwarder direct assembly: %d bytes, start=%s", len(stream), stream[:8].hex())
         try:
-            xml = zlib.decompress(bytes(buf)).decode("utf-8")
-            logger.info("ATAK Forwarder CoT (direct) from %s: %s", node_id, xml[:120])
+            xml = zlib.decompress(stream).decode("utf-8")
+            logger.info("ATAK Forwarder CoT (direct) from %s: %s", node_id, xml[:200])
             _buf.pop(key, None)
             return xml, f"ATAK Forwarder CoT from {node_id}"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("ATAK Forwarder direct decompress failed: %s", e)
 
     # --- Strategy 2: XOR ALL pairs (same or different offset) ---
     for i in range(len(all_vals)):
