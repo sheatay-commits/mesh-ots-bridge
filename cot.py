@@ -254,13 +254,15 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
             try:
                 dec = zlib.decompressobj()
                 partial = dec.decompress(recovered).decode("utf-8", errors="replace")
+                logger.info("ATAK Forwarder partial XML: %s", partial[:300])
                 xml = _synthesize_cot_from_partial(partial, node_id)
                 if xml:
-                    logger.info("ATAK Forwarder CoT (XOR partial) from %s: %s", node_id, partial[:120])
+                    logger.info("ATAK Forwarder CoT (XOR partial) from %s", node_id)
                     _buf.pop(key, None)
                     return xml, f"ATAK Forwarder CoT (partial) from {node_id}"
-            except Exception:
-                pass
+                logger.warning("ATAK Forwarder synthesis failed (no lat/lon in partial)")
+            except Exception as e:
+                logger.warning("ATAK Forwarder decompressobj error: %s", e)
 
     return None, f"ATAK Forwarder frag ({total_seen} frags seen) from {node_id}"
 
