@@ -187,7 +187,9 @@ def atak_plugin_to_cot(packet, decoded):
     required, since older meshtastic-python versions don't include it.
     Returns (xml_str, summary) or (None, summary) if not forwardable.
     """
-    node_id = f"!{packet.get('fromId', 'unknown').lstrip('!')}"
+    raw_id  = packet.get("fromId", "unknown").lstrip("!")
+    node_id = f"!{raw_id}"
+    label   = f"MESH-{raw_id.upper()}"   # e.g. MESH-A73AB2FE — no ! in callsign
 
     payload = decoded.get("payload", b"")
     if not payload:
@@ -213,9 +215,9 @@ def atak_plugin_to_cot(packet, decoded):
             ET.SubElement(root, "point", lat=str(lat), lon=str(lon),
                           hae=str(alt or 0), ce="9999999", le="9999999")
             detail = ET.SubElement(root, "detail")
-            ET.SubElement(detail, "uid", Droid=node_id)
-            ET.SubElement(detail, "contact", callsign=node_id)
-            return ET.tostring(root, encoding="unicode"), f"ATAK PLI from {node_id} ({lat:.4f},{lon:.4f})"
+            ET.SubElement(detail, "uid", Droid=label)
+            ET.SubElement(detail, "contact", callsign=label)
+            return ET.tostring(root, encoding="unicode"), f"ATAK PLI from {label} ({lat:.4f},{lon:.4f})"
         return None, f"ATAK compressed (no position) from {node_id}"
 
     # Uncompressed: try protobuf decode
