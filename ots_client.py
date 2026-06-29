@@ -39,16 +39,26 @@ class OTSClient:
         self._close()
 
     def send_cot(self, xml_str):
-        with self._lock:
-            if self._sock and self._connected:
-                try:
-                    data = (xml_str.strip() + "\n").encode("utf-8")
-                    self._sock.sendall(data)
-                    return True
-                except Exception as e:
-                    logger.error("OTS send failed: %s", e)
-                    self._connected = False
-        return False
+        # OTS only plots EUDs on the map from fresh TCP connections.
+        # A persistent connection gets CoT stored in the EUD database but
+        # not rendered on the map. Open a new connection for each send.
+        try:
+            data = (xml_str.strip() + "\n").encode("utf-8")
+            raw = socket.create_connection((self.host, self.port), timeout=5)
+            if self.use_ssl:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                sock = ctx.wrap_socket(raw, server_hostname=self.host)
+            else:
+                sock = raw
+            sock.sendall(data)
+            time.sleep(0.1)
+            sock.close()
+            return True
+        except Exception as e:
+            logger.error("OTS send failed: %s", e)
+            return False
 
     # ------------------------------------------------------------------
 
