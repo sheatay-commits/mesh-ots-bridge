@@ -55,7 +55,9 @@ def position_to_cot(packet, callsign):
         "le": "9999999",
     })
     detail = ET.SubElement(root, "detail")
-    ET.SubElement(detail, "contact", callsign=callsign or node_id)
+    label = callsign or node_id
+    ET.SubElement(detail, "uid", Droid=label)
+    ET.SubElement(detail, "contact", callsign=label)
     return ET.tostring(root, encoding="unicode")
 
 
@@ -211,6 +213,7 @@ def atak_plugin_to_cot(packet, decoded):
             ET.SubElement(root, "point", lat=str(lat), lon=str(lon),
                           hae=str(alt or 0), ce="9999999", le="9999999")
             detail = ET.SubElement(root, "detail")
+            ET.SubElement(detail, "uid", Droid=node_id)
             ET.SubElement(detail, "contact", callsign=node_id)
             return ET.tostring(root, encoding="unicode"), f"ATAK PLI from {node_id} ({lat:.4f},{lon:.4f})"
         return None, f"ATAK compressed (no position) from {node_id}"
