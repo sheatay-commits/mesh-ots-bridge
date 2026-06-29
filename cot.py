@@ -217,54 +217,68 @@ def atak_forwarder_to_cot(packet, decoded, _buf={}):
     if data not in seen:
         seen.append(data)
 
-    # Flatten all unique data values across all offsets for cross-pair XOR
-    all_vals = [v for vals in _buf[key].values() for v in vals]
-    total_seen = len(all_vals)
+    total_seen = sum(len(v) for v in _buf[key].values())
 
-    # --- Strategy 1: direct assembly (works if we have offset=0 fragment) ---
-    if 0 in _buf[key] and _buf[key][0]:
-        buf_size = max(o + len(_buf[key][o][0]) for o in _buf[key])
+    # Encoding scheme (empirically verified):
+    # - Fragments where only ONE data value exists at an offset:
+    #     data = compressed[offset : offset+213]   (systematic/direct)
+    # - Fragments where TWO data values exist at the same offset:
+    #     one is systematic, one is parity = systematic XOR compressed[0:213]
+    #     → XOR of the pair = compressed[0:213]
+    #
+    # Strategy: find compressed[0:213] via XOR, treat unique-offset fragments
+    # as direct content, assemble the full stream, decompress.
+
+    compressed_start = None  # compressed[0:213] recovered via XOR
+    for off, vals in _buf[key].items():
+        for i in range(len(vals)):
+            for j in range(i + 1, len(vals)):
+                candidate = bytes(a ^ b for a, b in zip(vals[i], vals[j]))
+                if candidate[:2] == b'\x78\x9c':
+                    compressed_start = candidate
+                    logger.info("ATAK Forwarder XOR hit at offset=0x%02x: %s", off, candidate[:8].hex())
+                    break
+            if compressed_start:
+                break
+        if compressed_start:
+            break
+
+    if compressed_start:
+        # Build the full compressed stream:
+        # compressed[0:213] = compressed_start
+        # compressed[off:off+213] = vals[0] for offsets with exactly 1 data value
+        buf_size = 213
+        single_offset_frags = {o: v[0] for o, v in _buf[key].items() if len(v) == 1}
+        if single_offset_frags:
+            buf_size = max(buf_size, max(o + len(d) for o, d in single_offset_frags.items()))
         buf = bytearray(buf_size)
-        for o, vals in _buf[key].items():
-            buf[o:o + len(vals[0])] = vals[0]
+        # Write direct fragments first (lower priority at overlaps)
+        for o, d in sorted(single_offset_frags.items(), reverse=True):
+            buf[o:o + len(d)] = d
+        # compressed_start covers [0:213] — write last to win at overlaps
+        buf[0:len(compressed_start)] = compressed_start
         stream = bytes(buf)
-        logger.info("ATAK Forwarder direct assembly: %d bytes, start=%s", len(stream), stream[:8].hex())
+        logger.info("ATAK Forwarder assembled: %d bytes, start=%s", len(stream), stream[:8].hex())
         try:
             xml = zlib.decompress(stream).decode("utf-8")
-            logger.info("ATAK Forwarder CoT (direct) from %s: %s", node_id, xml[:200])
+            logger.info("ATAK Forwarder CoT from %s: %s", node_id, xml[:200])
             _buf.pop(key, None)
             return xml, f"ATAK Forwarder CoT from {node_id}"
         except Exception as e:
-            logger.warning("ATAK Forwarder direct decompress failed: %s", e)
-
-    # --- Strategy 2: XOR ALL pairs (same or different offset) ---
-    for i in range(len(all_vals)):
-        for j in range(i + 1, len(all_vals)):
-            recovered = bytes(a ^ b for a, b in zip(all_vals[i], all_vals[j]))
-            xor_start = recovered[:4].hex()
-            logger.debug("ATAK XOR pair %d×%d => %s", i, j, xor_start)
-            if recovered[:2] != b'\x78\x9c':
-                continue
-            logger.info("ATAK Forwarder XOR hit: %s", recovered[:8].hex())
-            try:
-                xml = zlib.decompress(recovered).decode("utf-8")
-                logger.info("ATAK Forwarder CoT (XOR full) from %s: %s", node_id, xml[:120])
+            logger.warning("ATAK Forwarder decompress failed (%d bytes): %s", len(stream), e)
+            # Fall through to partial extraction
+        try:
+            dec = zlib.decompressobj()
+            partial = dec.decompress(stream).decode("utf-8", errors="replace")
+            logger.info("ATAK Forwarder partial XML: %s", partial[:300])
+            xml = _synthesize_cot_from_partial(partial, node_id)
+            if xml:
+                logger.info("ATAK Forwarder CoT (partial) from %s", node_id)
                 _buf.pop(key, None)
-                return xml, f"ATAK Forwarder CoT from {node_id}"
-            except Exception:
-                pass
-            try:
-                dec = zlib.decompressobj()
-                partial = dec.decompress(recovered).decode("utf-8", errors="replace")
-                logger.info("ATAK Forwarder partial XML: %s", partial[:300])
-                xml = _synthesize_cot_from_partial(partial, node_id)
-                if xml:
-                    logger.info("ATAK Forwarder CoT (XOR partial) from %s", node_id)
-                    _buf.pop(key, None)
-                    return xml, f"ATAK Forwarder CoT (partial) from {node_id}"
-                logger.warning("ATAK Forwarder synthesis failed (no lat/lon in partial)")
-            except Exception as e:
-                logger.warning("ATAK Forwarder decompressobj error: %s", e)
+                return xml, f"ATAK Forwarder CoT (partial) from {node_id}"
+            logger.warning("ATAK Forwarder synthesis failed (no lat/lon)")
+        except Exception as e:
+            logger.warning("ATAK Forwarder partial extract error: %s", e)
 
     return None, f"ATAK Forwarder frag ({total_seen} frags seen) from {node_id}"
 
