@@ -40,8 +40,8 @@ class OTSClient:
 
     def send_cot(self, xml_str):
         # OTS only plots EUDs on the map from fresh TCP connections.
-        # A persistent connection gets CoT stored in the EUD database but
-        # not rendered on the map. Open a new connection for each send.
+        # Use a new socket per send, then half-close so OTS can finish
+        # processing before we tear down the connection.
         try:
             data = (xml_str.strip() + "\n").encode("utf-8")
             raw = socket.create_connection((self.host, self.port), timeout=5)
@@ -53,7 +53,14 @@ class OTSClient:
             else:
                 sock = raw
             sock.sendall(data)
-            time.sleep(0.1)
+            # Signal end of our data, then drain OTS's response before closing
+            sock.shutdown(socket.SHUT_WR)
+            try:
+                sock.settimeout(1.0)
+                while sock.recv(4096):
+                    pass
+            except Exception:
+                pass
             sock.close()
             return True
         except Exception as e:
